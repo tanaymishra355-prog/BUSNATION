@@ -158,6 +158,7 @@ I. API MAP
     GET  /api/bookings?passenger_id= View a passenger's tickets
     POST /api/book                   Book seat + payment + optional luggage
     POST /api/cancel/:bookingId      Cancel a ticket and release its seat
+    POST /api/setup                  One-time hosted-DB bootstrap (SETUP_TOKEN)
     GET  /api/table/:name            Read an allowlisted table/view
     POST /api/query                  Run one teaching SQL statement
     POST /api/constraint-demo        Demonstrate FK/UNIQUE/CHECK/trigger rules

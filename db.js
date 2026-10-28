@@ -4,6 +4,7 @@ const mysql = require('mysql2/promise');
 
 // One pool for the whole app: 5 reusable connections so requests do not
 // re-handshake with MySQL every time. dateStrings keeps DATETIME readable.
+// DB_SSL=true turns on TLS for hosted providers (TiDB, PlanetScale, Aiven...).
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -11,6 +12,7 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
   connectionLimit: 5,
   dateStrings: true,
+  ssl: process.env.DB_SSL === 'true' ? { minVersion: 'TLSv1.2', rejectUnauthorized: true } : undefined,
 });
 
 // Whitelist: table name -> the exact SQL used to read it. Anything not listed

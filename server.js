@@ -9,6 +9,48 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Hosted MySQL services refuse DROP/CREATE DATABASE and some disallow USE.
+// Strip those lines and the client-only DELIMITER markers, then split the file
+// into single statements (trigger bodies keep their internal semicolons).
+function sqlStatements(sqlText) {
+  const executable = sqlText
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(DROP\s+DATABASE|CREATE\s+DATABASE|USE|DELIMITER)\b/i.test(line));
+  const boundary = /^(CREATE|DELETE|ALTER|INSERT|TRUNCATE|SET)\b/i;
+  const statements = [];
+  let current = null;
+  for (const line of executable) {
+    if (boundary.test(line)) {
+      if (current !== null) statements.push(current);
+      current = line;
+    } else if (current !== null) {
+      current += `\n${line}`;
+    }
+  }
+  if (current !== null) statements.push(current);
+  return statements
+    .map((statement) => statement.replace(/;;\s*$/, ';').trim())
+    .filter(Boolean);
+}
+
+async function runSqlFile(conn, fileName) {
+  const sqlText = fs.readFileSync(path.join(__dirname, fileName), 'utf8');
+  const statements = sqlStatements(sqlText);
+  for (const statement of statements) await conn.query(statement);
+  return statements.length;
+}
+
+function tempConnection() {
+  return mysql.createConnection({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    dateStrings: true,
+    ssl: process.env.DB_SSL === 'true' ? { minVersion: 'TLSv1.2', rejectUnauthorized: true } : undefined,
+  });
+}
+
 // A ticket, payment and optional luggage entry commit together or roll back
 // together. SELECT FOR UPDATE serializes two attempts for the same seat.
 async function bookSeat(conn, options, trace, actor = 'APP') {
@@ -429,20 +471,34 @@ app.get('/api/logs/general', wrap(async (req, res) => {
   res.json({ ok: true, enabled: true, rows });
 }));
 
-app.post('/api/reset', wrap(async (req, res) => {
-  const conn = await mysql.createConnection({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    multipleStatements: true,
-    dateStrings: true,
-  });
+// One-time hosted-database bootstrap: creates tables, triggers and sample data
+// without CREATE DATABASE (managed MySQL refuses it). Guarded by SETUP_TOKEN.
+app.post('/api/setup', wrap(async (req, res) => {
+  const token = process.env.SETUP_TOKEN;
+  if (!token || req.get('x-setup-token') !== token) {
+    return res.status(403).json({ ok: false, code: 'FORBIDDEN', message: 'missing or wrong x-setup-token header' });
+  }
+  const conn = await tempConnection();
   try {
-    const seed = fs.readFileSync(path.join(__dirname, 'seed.sql'), 'utf8');
-    await conn.query(seed);
-    await conn.query('TRUNCATE TABLE mysql.general_log');
-    res.json({ ok: true, message: 'BUSNATION sample data reset' });
+    const schemaStatements = await runSqlFile(conn, 'schema.sql');
+    const seedStatements = await runSqlFile(conn, 'seed.sql');
+    res.json({ ok: true, message: 'busnation schema and sample data are ready', schemaStatements, seedStatements });
+  } finally {
+    await conn.end();
+  }
+}));
+
+app.post('/api/reset', wrap(async (req, res) => {
+  const conn = await tempConnection();
+  try {
+    const statements = await runSqlFile(conn, 'seed.sql');
+    let logCleared = true;
+    try {
+      await conn.query('TRUNCATE TABLE mysql.general_log');  // local MySQL only; hosted users lack the privilege
+    } catch (_) {
+      logCleared = false;
+    }
+    res.json({ ok: true, message: 'BUSNATION sample data reset', statements, logCleared });
   } finally {
     await conn.end();
   }
@@ -456,5 +512,9 @@ function wrap(handler) {
   });
 }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`BUSNATION listening on http://localhost:${PORT}`));
+module.exports = app;
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`BUSNATION listening on http://localhost:${PORT}`));
+}

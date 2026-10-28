@@ -77,6 +77,22 @@ SET GLOBAL general_log = 'ON';
 
 Turn it off after the demo with `SET GLOBAL general_log = 'OFF';`.
 
+## Deploy to Vercel (with a hosted MySQL)
+
+Vercel runs the app, but provides no MySQL server, so pair it with a hosted MySQL such as TiDB Cloud Serverless (free tier), PlanetScale, or Aiven.
+
+1. Create a hosted MySQL database and note its host, user, password and database name.
+2. Push this repository to GitHub, then on vercel.com choose **Add New → Project → Import** the repo.
+3. Add environment variables in the Vercel project settings:
+   - `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+   - `DB_SSL=true` (TiDB and most managed providers require TLS)
+   - `SETUP_TOKEN=any-long-random-string`
+4. Deploy, then bootstrap the schema once:
+   `curl -X POST https://your-app.vercel.app/api/setup -H "x-setup-token: YOUR_SETUP_TOKEN"`
+5. Open the app URL — `/api/health` should report connected.
+
+The hosted setup route skips the local-only `DROP/CREATE DATABASE` lines and creates all tables, triggers and sample data inside your hosted database. Use **POST /api/reset** later to restore the sample data.
+
 ## Local-demo limitations
 
 This project simulates a successful payment record; it does **not** contact a payment provider. It has no user authentication, and its SQL console permits writes for teaching purposes. Keep it on localhost—do not expose it as a public booking service without adding authentication, payment integration, rate limits, and stricter database/API permissions.
