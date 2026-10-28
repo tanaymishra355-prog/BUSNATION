@@ -1,40 +1,82 @@
-# SKYLEDGER — RDBMS teaching demo (airline seat booking)
+# BUSNATION
 
-A small local web app demonstrating normalization (1NF-3NF), transactions,
-ACID, constraints, triggers, locking/isolation and database logs on MySQL 8.
-The audience watches the database change live while the presenter runs
-actions or raw SQL -- via a passenger booking site and a DBMS console view.
+BUSNATION is a local intercity bus ticketing app and RDBMS teaching demo. Passengers can browse scheduled trips, choose a seat, add luggage, confirm a ticket, and cancel it later. A separate operations view exposes the database tables, transactions, constraints, audit log, and SQL examples.
 
-## Prerequisites
+## Project structure
 
-Node.js 18+, npm, MySQL 8 (local), a user that can create databases.
+```text
+BUSNATION/
+├── public/
+│   ├── index.html          # Passenger booking page and operations console
+│   ├── site.js             # Trips, seats, passengers, checkout and tickets
+│   ├── app.js              # RDBMS console, table explorer and logs
+│   └── style.css           # BUSNATION visual system and responsive layout
+├── sql/
+│   ├── 1nf.sql              # Split the flat luggage list into atomic rows
+│   ├── 2nf.sql              # Separate repeated trip facts
+│   └── 3nf.sql              # Separate passenger and trip facts
+├── db.js                    # MySQL pool, table whitelist and shared helpers
+├── server.js                # Express API and transactional booking logic
+├── schema.sql               # Database, tables, constraints and triggers
+├── seed.sql                 # Repeatable sample terminals, trips and tickets
+├── PROJECT_EXPLAINED.txt    # Walkthrough for presenting the project
+├── package-lock.json
+├── package.json
+├── .env.example
+└── .gitignore
+```
 
-## Setup
+## Run locally
 
-    npm install
-    mysql -u root -p < schema.sql      # drops and recreates the skyledger DB
-    mysql -u root -p < seed.sql        # idempotent demo data
-    cp .env.example .env               # set DB_USER / DB_PASSWORD
-    npm start                          # http://localhost:3000
+Requirements: Node.js 18+ and MySQL 8.0.16+ (the project uses enforced `CHECK` constraints).
 
-Optional normalization walk-through (adds view tabs in the UI):
-`mysql -u root -p skyledger < sql/1nf.sql` and the same for `sql/2nf.sql`,
-`sql/3nf.sql`. Reset any time with the "Reset demo data" button.
+1. Install dependencies: `npm ci`
+2. Copy `.env.example` to `.env` and set your local MySQL user and password.
+3. Run `mysql -u root -p < schema.sql`.
+4. Run `mysql -u root -p < seed.sql`.
+5. Start the app with `npm start` and open [http://localhost:3000](http://localhost:3000).
 
-## Demo script (8 steps; details in PROJECT_EXPLAINED.txt)
+**Important:** `schema.sql` drops and recreates the `busnation` database. Do not run it against a database containing data you need.
 
-1. Tab `unnormalized_bookings` + the three anomaly buttons -> run each query.
-2. Tabs `bookings`, `seats`, `payments`, `baggage`: the 3NF layout.
-3. Book seat 2B: new row + 3 audit-log trigger rows.
-4. Book with forced failure (after payment): trace shows ROLLBACK, no partial rows.
-5. Concept buttons FK / UNIQUE / CHECK / Trigger: raw MySQL error codes (1452/1062/3819/1644).
-6. Isolation demo on a free seat: A locks + commits, B waits (LOCK WAIT), B fails (1644).
-7. Restart Node (Ctrl-C, `npm start`): data is still there (durability).
-8. SQL box: SELECT * FROM mysql.general_log ... (server-level log).
+The `.env` file is ignored by Git. Never put a password or access token in source files.
 
-## Enabling the general query log (needed for step 8)
+## Booking flow
 
-    SET GLOBAL log_output = 'TABLE';
-    SET GLOBAL general_log = 'ON';   # off after the demo: SET GLOBAL general_log = 'OFF'
+- Browse the sample Mumbai–Pune, Delhi–Jaipur, and Bengaluru–Chennai trips.
+- See live seat availability and fares; front-row seats have a separate fare.
+- Select a passenger or add a passenger record, then optionally add luggage (₹50/kg, 1–40 kg).
+- Confirm a ticket. The ticket, payment record, and optional luggage record are created in one transaction.
+- Review or cancel a ticket under **My tickets**. Cancellation keeps the history and releases the seat.
 
-All concepts, queries and triggers are explained in PROJECT_EXPLAINED.txt.
+Sample trips and fares are stored in MySQL, not hard-coded into the page. `seed.sql` restores the same demo dataset and resets generated IDs.
+
+## RDBMS lab
+
+Choose **RDBMS lab** in the top navigation to explore:
+
+- Normalized tables for terminals, buses, trips, seats, passengers, bookings, payments, and luggage.
+- Primary/foreign keys, unique and check constraints, and a database-level active-seat uniqueness rule.
+- Booking transactions, forced rollbacks, row locks, and a two-connection isolation demo.
+- Trigger-written audit rows and, optionally, MySQL's general query log.
+- A single-statement SQL box and the flat-table normalization examples.
+
+To create the optional normalization views, run:
+
+```sh
+mysql -u root -p busnation < sql/1nf.sql
+mysql -u root -p busnation < sql/2nf.sql
+mysql -u root -p busnation < sql/3nf.sql
+```
+
+The general query log is off by default. To enable it in MySQL, use an administrative account:
+
+```sql
+SET GLOBAL log_output = 'TABLE';
+SET GLOBAL general_log = 'ON';
+```
+
+Turn it off after the demo with `SET GLOBAL general_log = 'OFF';`.
+
+## Local-demo limitations
+
+This project simulates a successful payment record; it does **not** contact a payment provider. It has no user authentication, and its SQL console permits writes for teaching purposes. Keep it on localhost—do not expose it as a public booking service without adding authentication, payment integration, rate limits, and stricter database/API permissions.

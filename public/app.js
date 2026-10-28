@@ -1,43 +1,46 @@
-// app.js: browser logic for skyledger — seat map, booking actions, polling of
-// tables and logs, SQL box. Plain functions, no framework, talks to /api/*.
+// RDBMS lab: trip seat map, transactional ticket actions, tables and logs.
 'use strict';
 
 const state = {
-  flights: [],
-  flightId: null,
-  seatId: null,          // selected seat (free or booked)
+  trips: [],
+  tripId: null,
+  seatId: null,
   selectedBookingId: null,
   passengers: [],
   tableTab: 'bookings',
   logTab: 'audit',
   auditSince: 0,
-  prevRows: new Map(),   // table row key -> JSON text, for the flash comparison
-  lastTrace: [],         // steps of the most recent action, for future views
+  prevRows: new Map(),
+  lastTrace: [],
 };
 
-// Status values -> badge color kind. Columns named in BADGE_COLS render as
-// badges instead of plain text so the table reads at a glance.
 const BADGE_KIND = {
   CONFIRMED: 'ok', PAID: 'ok', INSERT: 'ok', OK: 'ok',
   CANCELLED: 'err', FAILED: 'err', DELETE: 'err', ERROR: 'err',
   UPDATE: 'info', WAIT: 'wait',
 };
 const BADGE_COLS = new Set(['status', 'action', 'payment_status']);
-
-function badgeCell(text) {
-  const s = document.createElement('span');
-  s.className = 'badge b-' + (BADGE_KIND[text] || 'wait');
-  s.textContent = text;
-  return s;
-}
-
 const $ = (id) => document.getElementById(id);
 
-// One fetch wrapper: every API error becomes a thrown {code, message}.
+function badgeCell(text) {
+  const badge = document.createElement('span');
+  badge.className = `badge b-${BADGE_KIND[text] || 'wait'}`;
+  badge.textContent = text;
+  return badge;
+}
+
 async function api(path, options) {
-  const res = await fetch(path, options);
-  const body = await res.json();
-  if (!body.ok) throw Object.assign(new Error(body.message || 'request failed'), { code: body.code });
+  const response = await fetch(path, options);
+  let body;
+  try { body = await response.json(); } catch (_) { body = {}; }
+  if (!response.ok || !body.ok) {
+    throw Object.assign(new Error(body.message || `request failed (${response.status})`), {
+      code: body.code,
+      trace: body.trace,
+      committed: body.committed,
+      sqlState: body.sqlState,
+    });
+  }
   return body;
 }
 
@@ -47,123 +50,143 @@ const post = (path, data) => api(path, {
   body: JSON.stringify(data),
 });
 
-function showError(id, e) {
-  const el = $(id);
-  el.textContent = e.code ? `[${e.code}] ${e.message}` : e.message;
+function showError(id, error) {
+  const element = $(id);
+  if (element) element.textContent = error.code ? `[${error.code}] ${error.message}` : error.message;
 }
 
-// ---------- flights, passengers, seat map ----------
-
-async function loadFlights() {
-  const body = await api('/api/flights');
-  state.flights = body.rows;
-  const sel = $('flight-select');
-  sel.textContent = '';
-  for (const f of state.flights) {
-    const o = document.createElement('option');
-    o.value = f.flight_id;
-    o.textContent = `${f.flight_no}  ${f.origin_code}-${f.dest_code}  ${f.departs_at}`;
-    sel.appendChild(o);
+// Trips, passengers and the operations seat map.
+async function loadTrips() {
+  const body = await api('/api/trips');
+  state.trips = body.rows;
+  const select = $('trip-select');
+  select.textContent = '';
+  for (const trip of state.trips) {
+    const option = document.createElement('option');
+    option.value = trip.trip_id;
+    option.textContent = `${trip.trip_no}  ${trip.origin_code}–${trip.dest_code}  ${trip.departs_at}`;
+    select.appendChild(option);
   }
-  state.flightId = state.flights[0] ? state.flights[0].flight_id : null;
+  if (!state.trips.some((trip) => trip.trip_id === state.tripId)) {
+    state.tripId = state.trips[0] ? state.trips[0].trip_id : null;
+  }
+  if (state.tripId != null) select.value = String(state.tripId);
   await refreshSeatMap();
 }
 
 async function loadPassengers() {
   const body = await api('/api/table/passengers');
   state.passengers = body.rows;
-  const sel = $('passenger-select');
-  sel.textContent = '';
-  for (const p of state.passengers) {
-    const o = document.createElement('option');
-    o.value = p.passenger_id;
-    o.textContent = `${p.name}  ${p.email}`;
-    sel.appendChild(o);
+  const select = $('passenger-select');
+  const previous = select.value;
+  select.textContent = '';
+  for (const passenger of state.passengers) {
+    const option = document.createElement('option');
+    option.value = passenger.passenger_id;
+    option.textContent = `${passenger.name} · ${passenger.email}`;
+    select.appendChild(option);
+  }
+  if (state.passengers.some((passenger) => String(passenger.passenger_id) === previous)) {
+    select.value = previous;
   }
 }
 
-// Seat map: booked seats show an X and strikethrough (not colour-only) and
-// carry an aria-label; clicking a booked seat selects it for cancellation.
 async function refreshSeatMap() {
-  if (state.flightId == null) return;
-  const body = await api(`/api/flights/${state.flightId}/seats`);
   const map = $('seat-map');
   map.textContent = '';
-  for (const s of body.rows) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'seat ' + (s.booking_id ? 'booked' : 'free');
-    b.setAttribute('aria-label', s.booking_id
-      ? `Seat ${s.seat_no}, booked by ${s.passenger_name}`
-      : `Seat ${s.seat_no}, free, ${s.class}, fare ${s.fare}`);
-    if (s.booking_id) { b.title = `booked by ${s.passenger_name}`; }
-    // the X sits in its own span so the strikethrough only hits the seat number
-    const x = document.createElement('span');
-    x.className = 'seatx';
-    x.textContent = s.booking_id ? 'X ' : '';
+  if (state.tripId == null) return;
+  const body = await api(`/api/trips/${state.tripId}/seats`);
+  for (const seat of body.rows) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    const booked = seat.booking_id != null;
+    button.className = `seat ${booked ? 'booked' : 'free'}${seat.class === 'FRONT_ROW' ? ' front' : ''}`;
+    button.setAttribute('aria-pressed', String(seat.seat_id === state.seatId));
+    button.setAttribute('aria-label', booked
+      ? `Seat ${seat.seat_no}, booked by ${seat.passenger_name}`
+      : `Seat ${seat.seat_no}, free, ${seat.class}, fare ${seat.fare}`);
+    if (booked) button.title = `Booked by ${seat.passenger_name}`;
+    if (seat.seat_id === state.seatId) button.classList.add(booked ? 'selected' : 'freesel');
+    const cross = document.createElement('span');
+    cross.className = 'seatx';
+    cross.textContent = booked ? '×' : '';
     const label = document.createElement('span');
     label.className = 'slabel';
-    label.textContent = s.seat_no;
-    b.appendChild(x);
-    b.appendChild(label);
-    if (s.seat_id === state.seatId) b.classList.add(s.booking_id ? 'selected' : 'freesel');
-    b.addEventListener('click', () => selectSeat(s));
-    map.appendChild(b);
+    label.textContent = seat.seat_no;
+    button.append(cross, label);
+    button.addEventListener('click', () => selectSeat(seat));
+    map.appendChild(button);
   }
 }
 
-// One seat selected at a time: free seat = bookable, booked seat = cancellable.
-function selectSeat(s) {
-  state.seatId = s.seat_id;
-  state.selectedBookingId = s.booking_id || null;
+function selectSeat(seat) {
+  state.seatId = seat.seat_id;
+  state.selectedBookingId = seat.booking_id || null;
   $('btn-cancel').disabled = !state.selectedBookingId;
-  refreshSeatMap();
+  $('seat-hint').textContent = state.selectedBookingId
+    ? `Selected seat ${seat.seat_no}, booked by ${seat.passenger_name}. Cancel it to release the seat.`
+    : `Selected ${seat.seat_no} · ${seat.class} · ₹${Number(seat.fare).toFixed(2)}`;
+  refreshSeatMap().catch((error) => showError('book-error', error));
 }
 
-// ---------- booking actions ----------
-
-async function runBook(forceFail) {
+// One transaction per ticket: booking + payment + optional luggage.
+async function runBook(forceFail = false) {
   $('book-error').textContent = '';
+  if (state.tripId == null || state.seatId == null || state.selectedBookingId != null) {
+    $('book-error').textContent = 'Choose an available seat first.';
+    return;
+  }
+  if (!Number($('passenger-select').value)) {
+    $('book-error').textContent = 'Add a passenger before booking a ticket.';
+    return;
+  }
+  const failAt = forceFail ? $('fail-at').value : null;
+  if (forceFail && !failAt) {
+    $('book-error').textContent = 'Choose a failure point to test rollback.';
+    return;
+  }
   try {
     const body = await post('/api/book', {
-      flight_id: state.flightId,
+      trip_id: state.tripId,
       seat_id: state.seatId,
       passenger_id: Number($('passenger-select').value),
-      baggage_kg: Number($('baggage-kg').value) || 0,
-      fail_at: forceFail ? $('fail-at').value : null,
+      luggage_kg: Number($('luggage-kg').value) || 0,
+      fail_at: failAt,
     });
     renderTrace(body.trace);
+    state.seatId = null;
     await refreshAfterAction();
-  } catch (e) {
-    if (e.trace) renderTrace(e.trace);
-    showError('book-error', e);
+  } catch (error) {
+    if (error.trace) renderTrace(error.trace);
+    showError('book-error', error);
     await refreshAfterAction();
   }
 }
 
 async function runCancel() {
+  if (!state.selectedBookingId) return;
   $('book-error').textContent = '';
   try {
-    const body = await post(`/api/cancel/${state.selectedBookingId}`);
+    const body = await post(`/api/cancel/${state.selectedBookingId}`, {});
     renderTrace(body.trace);
     state.selectedBookingId = null;
     state.seatId = null;
     $('btn-cancel').disabled = true;
+    $('seat-hint').textContent = 'Ticket cancelled. The seat is available again.';
     await refreshAfterAction();
-  } catch (e) {
-    if (e.trace) renderTrace(e.trace);
-    showError('book-error', e);
+  } catch (error) {
+    if (error.trace) renderTrace(error.trace);
+    showError('book-error', error);
     await refreshAfterAction();
   }
 }
 
-// After any action the tables, seat map and audit log may all have moved.
 async function refreshAfterAction() {
   await Promise.all([refreshSeatMap(), refreshTable()]);
   if (state.logTab === 'audit') await pollAudit();
+  if (typeof loadSiteTrips === 'function') await loadSiteTrips();
+  if (typeof loadMyTickets === 'function') await loadMyTickets();
 }
-
-// ---------- concept demos ----------
 
 async function runConceptDemo(type) {
   $('concept-error').textContent = '';
@@ -174,248 +197,213 @@ async function runConceptDemo(type) {
       : `${type}: MySQL error [${body.code} / SQLSTATE ${body.sqlState}] ${body.message}`;
     renderTrace([{ ts: nowTs(), actor: 'DB', step: line, status: body.code === 'NO_ERROR' ? 'OK' : 'ERROR' }]);
     $('concept-error').textContent = line;
-  } catch (e) { showError('concept-error', e); }
+  } catch (error) {
+    showError('concept-error', error);
+  }
 }
 
-// A vs B on the same seat: A wins, B waits on the row lock and then fails.
 async function runIsolationDemo() {
   $('concept-error').textContent = '';
-  if (state.seatId == null || state.selectedBookingId != null) {
-    $('concept-error').textContent = 'select a FREE seat in the seat map first';
+  if (state.tripId == null || state.seatId == null || state.selectedBookingId != null) {
+    $('concept-error').textContent = 'Select an available seat in the seat map first.';
+    return;
+  }
+  if (!Number($('passenger-select').value)) {
+    $('concept-error').textContent = 'Add a passenger before running the seat-lock demo.';
     return;
   }
   try {
     const body = await post('/api/isolation-demo', {
-      flight_id: state.flightId,
+      trip_id: state.tripId,
       seat_id: state.seatId,
       passenger_id: Number($('passenger-select').value),
     });
     renderTrace(body.trace);
+    state.seatId = null;
     await refreshAfterAction();
-  } catch (e) {
-    if (e.trace) renderTrace(e.trace);
-    showError('concept-error', e);
+  } catch (error) {
+    if (error.trace) renderTrace(error.trace);
+    showError('concept-error', error);
     await refreshAfterAction();
   }
 }
 
-// Normalization buttons load the anomaly queries into the SQL box; the user
-// runs them and sees what the flat table does (or refuses to do).
 const NORM_QUERIES = {
-  update: "UPDATE unnormalized_bookings SET passenger_email = 'asha.verma@newmail.com' WHERE booking_no = 'BK-1001';",
-  insert: "INSERT INTO unnormalized_bookings (booking_no, flight_no, origin_city, dest_city, seat_no, fare, payment_status)\nVALUES ('BK-1011', 'SK303', 'Delhi', 'Chennai', '1A', 5000.00, 'PENDING');",
-  delete: 'DELETE FROM unnormalized_bookings WHERE flight_no = \'SK202\';',
+  update: "UPDATE unnormalized_bookings SET passenger_email = 'asha.verma@newmail.com' WHERE booking_no = 'BT-1001'",
+  insert: "INSERT INTO unnormalized_bookings (booking_no, trip_no, operator_name, origin_city, dest_city, seat_no, fare, payment_status) VALUES ('BT-1011', 'BN999', 'New Operator', 'Pune', 'Nashik', '1A', 399.00, 'PENDING')",
+  delete: "DELETE FROM unnormalized_bookings WHERE trip_no = 'BN318'",
 };
 
 function loadNormalizationQuery(kind) {
-  $('sql-input').value = NORM_QUERIES[kind] + "\n\n-- then check: SELECT * FROM unnormalized_bookings;";
+  $('sql-input').value = NORM_QUERIES[kind] || '';
   $('sql-input').focus();
 }
 
-// ---------- tables (center) ----------
-
 const TABLE_TABS = [
-  'bookings', 'payments', 'baggage', 'seats', 'passengers', 'flights',
-  'airports', 'audit_log', 'unnormalized_bookings', 'bookings_1nf', 'bookings_2nf', 'bookings_3nf',
+  'bookings', 'payments', 'luggage', 'seats', 'passengers', 'trips', 'buses', 'terminals',
+  'audit_log', 'unnormalized_bookings', 'bookings_1nf', 'bookings_2nf', 'trips_2nf',
+  'bookings_3nf', 'passengers_3nf', 'trips_3nf',
 ];
 
 function renderTableTabs() {
   const nav = $('table-tabs');
-  for (const t of TABLE_TABS) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = t;
-    b.setAttribute('aria-pressed', String(t === state.tableTab));
-    b.addEventListener('click', () => { state.tableTab = t; renderTableTabs(); refreshTable(); });
-    nav.appendChild(b);
+  nav.textContent = '';
+  for (const tableName of TABLE_TABS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = tableName;
+    button.setAttribute('aria-pressed', String(tableName === state.tableTab));
+    button.addEventListener('click', () => {
+      state.tableTab = tableName;
+      renderTableTabs();
+      refreshTable();
+    });
+    nav.appendChild(button);
   }
 }
 
-// Render the active table; rows that appeared or changed since the last poll
-// get the 150ms flash.
 async function refreshTable() {
   $('table-error').textContent = '';
   try {
     const body = await api(`/api/table/${state.tableTab}`);
-    const table = $('data-table');
-    table.textContent = '';
-    const thead = document.createElement('thead');
-    const trh = document.createElement('tr');
-    for (const c of body.columns) {
-      const th = document.createElement('th');
-      th.scope = 'col';
-      th.textContent = c;
-      trh.appendChild(th);
-    }
-    thead.appendChild(trh);
-    table.appendChild(thead);
-    const tbody = document.createElement('tbody');
-    for (const row of body.rows) {
-      const key = String(row[body.columns[0]]);
-      const json = JSON.stringify(row);
-      const tr = document.createElement('tr');
-      if (!state.prevRows.has(key) || state.prevRows.get(key) !== json) tr.className = 'flash';
-      state.prevRows.set(key, json);
-      for (const c of body.columns) {
-        const td = document.createElement('td');
-        if (BADGE_COLS.has(c) && BADGE_KIND[row[c]]) {
-          td.appendChild(badgeCell(row[c]));
-        } else {
-          td.textContent = row[c] == null ? 'NULL' : String(row[c]);
-        }
-        tr.appendChild(td);
-      }
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-  } catch (e) {
+    renderDataTable($('data-table'), body.columns, body.rows, true);
+  } catch (error) {
     state.prevRows.clear();
-    showError('table-error', e);
+    showError('table-error', error);
   }
 }
 
-// ---------- logs (right) ----------
+function renderDataTable(table, columns, rows, flashNew = false) {
+  table.textContent = '';
+  if (!columns || !columns.length) return;
+  const thead = document.createElement('thead');
+  const headingRow = document.createElement('tr');
+  for (const column of columns) {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.textContent = column;
+    headingRow.appendChild(th);
+  }
+  thead.appendChild(headingRow);
+  table.appendChild(thead);
 
+  const tbody = document.createElement('tbody');
+  for (const row of rows) {
+    const key = String(row[columns[0]]);
+    const json = JSON.stringify(row);
+    const tr = document.createElement('tr');
+    if (flashNew && (!state.prevRows.has(key) || state.prevRows.get(key) !== json)) tr.className = 'flash';
+    if (flashNew) state.prevRows.set(key, json);
+    for (const column of columns) {
+      const td = document.createElement('td');
+      if (BADGE_COLS.has(column) && BADGE_KIND[row[column]]) td.appendChild(badgeCell(row[column]));
+      else td.textContent = row[column] == null ? 'NULL' : String(row[column]);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+}
+
+// Activity streams.
 function setLogTab(tab) {
   state.logTab = tab;
-  for (const b of $('log-tabs').querySelectorAll('button')) {
-    b.setAttribute('aria-pressed', String(b.dataset.log === tab));
+  for (const button of $('log-tabs').querySelectorAll('button')) {
+    button.setAttribute('aria-pressed', String(button.dataset.log === tab));
   }
   $('audit-list').hidden = tab !== 'audit';
   $('general-list').hidden = tab !== 'general';
   $('trace-list').hidden = tab !== 'trace';
+  if (tab === 'audit') pollAudit();
+  if (tab === 'general') pollGeneral();
 }
 
 function nowTs() {
-  const d = new Date();
-  const p = (n, w) => String(n).padStart(w, '0');
-  return `${p(d.getHours(), 2)}:${p(d.getMinutes(), 2)}:${p(d.getSeconds(), 2)}.${p(d.getMilliseconds(), 3)}`;
+  const date = new Date();
+  const pad = (value, width = 2) => String(value).padStart(width, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
 }
 
-function logItem(text, status, tsText, flash) {
-  const li = document.createElement('li');
-  const t = document.createElement('span');
-  t.className = 't';
-  t.textContent = tsText;
-  const s = document.createElement('span');
-  s.className = 'status-' + status.toLowerCase();
-  s.textContent = status;
-  li.appendChild(t);
-  li.appendChild(s);
-  li.appendChild(document.createTextNode(' ' + text));
-  if (flash) li.className = 'flash';
-  return li;
+function logItem(text, status, timeText, flash = false) {
+  const item = document.createElement('li');
+  const time = document.createElement('span');
+  time.className = 't';
+  time.textContent = timeText || '--';
+  const badge = document.createElement('span');
+  badge.className = `status-${String(status).toLowerCase()}`;
+  badge.textContent = status;
+  item.append(time, badge, document.createTextNode(` ${text}`));
+  if (flash) item.className = 'flash';
+  return item;
 }
 
-// Audit log: poll only rows newer than the last one we saw (since=<id>).
 async function pollAudit() {
   try {
     const body = await api(`/api/logs/audit?since=${state.auditSince}`);
     const list = $('audit-list');
-    for (const r of body.rows) {
-      const detail = r.new_data ? JSON.stringify(r.new_data) : JSON.stringify(r.old_data);
-      const text = `${r.action} ${r.table_name} row ${r.row_id} ${detail}`;
-      // every audit row is a change that actually happened, so status is OK
-      list.prepend(logItem(text, 'OK', r.logged_at, true));
-      state.auditSince = Math.max(state.auditSince, r.log_id);
+    for (const row of body.rows.slice().reverse()) {
+      const detail = row.new_data ? JSON.stringify(row.new_data) : JSON.stringify(row.old_data);
+      list.prepend(logItem(`${row.action} ${row.table_name} row ${row.row_id} ${detail}`, 'OK', row.logged_at, true));
+      state.auditSince = Math.max(state.auditSince, row.log_id);
     }
     while (list.children.length > 200) list.removeChild(list.lastChild);
-  } catch (e) { /* the audit panel stays as-is on a failed poll */ }
+  } catch (_) { /* Keep the last visible audit entries during a connection issue. */ }
 }
 
-// General log: newest 30 statements MySQL itself recorded for our user.
 async function pollGeneral() {
+  const list = $('general-list');
   try {
     const body = await api('/api/logs/general');
-    const list = $('general-list');
     list.textContent = '';
     if (!body.enabled) {
-      list.appendChild(logItem('general log is OFF — enable with SET GLOBAL general_log = "ON"', 'OK', '--', false));
+      list.appendChild(logItem('MySQL general log is OFF. Enable it on the database to inspect raw statements.', 'OK', '--'));
       return;
     }
-    for (const r of body.rows) {
-      list.appendChild(logItem(`${r.command_type} ${r.argument}`, 'OK', r.event_time, false));
-    }
-  } catch (e) {
-    const list = $('general-list');
+    for (const row of body.rows) list.appendChild(logItem(`${row.command_type} ${row.argument}`, 'OK', row.event_time));
+  } catch (error) {
     list.textContent = '';
-    list.appendChild(logItem(e.message, 'ERROR', '--', false));
+    list.appendChild(logItem(error.message, 'ERROR', '--'));
   }
 }
 
-// Transaction trace: the ordered steps of the last action, newest at the top.
 function renderTrace(trace) {
   state.lastTrace = trace.slice();
   const list = $('trace-list');
   list.textContent = '';
-  const items = trace.slice().reverse();
-  for (const s of items) {
-    const text = `${s.actor ? s.actor + ' ' : ''}${s.step}`;
-    list.appendChild(logItem(text, s.status || 'OK', s.ts, false));
+  for (const step of trace.slice().reverse()) {
+    list.appendChild(logItem(`${step.actor ? `${step.actor} ` : ''}${step.step}`, step.status || 'OK', step.ts));
   }
 }
 
-// ---------- SQL box ----------
-
 async function runQuery() {
   $('sql-error').textContent = '';
+  $('sql-table').textContent = '';
   const sql = $('sql-input').value.trim();
   if (!sql) return;
   try {
     const body = await post('/api/query', { sql });
-    const table = $('sql-table');
-    table.textContent = '';
-    if (body.columns && body.columns.length) {
-      const thead = document.createElement('thead');
-      const trh = document.createElement('tr');
-      for (const c of body.columns) {
-        const th = document.createElement('th');
-        th.scope = 'col';
-        th.textContent = c;
-        trh.appendChild(th);
-      }
-      thead.appendChild(trh);
-      table.appendChild(thead);
-      const tbody = document.createElement('tbody');
-      for (const row of body.rows) {
-        const tr = document.createElement('tr');
-        for (const c of body.columns) {
-          const td = document.createElement('td');
-          td.textContent = row[c] == null ? 'NULL' : String(row[c]);
-          tr.appendChild(td);
-        }
-        tbody.appendChild(tr);
-      }
-      table.appendChild(tbody);
-    } else {
-      const tr = document.createElement('tr');
-      const td = document.createElement('td');
-      td.textContent = `OK, affected rows: ${body.affectedRows}`;
-      tr.appendChild(td);
-      table.appendChild(tr);
-    }
+    if (body.columns && body.columns.length) renderDataTable($('sql-table'), body.columns, body.rows);
+    else $('sql-table').textContent = `OK · affected rows: ${body.affectedRows}`;
     await refreshAfterAction();
-  } catch (e) {
-    $('sql-table').textContent = '';
-    showError('sql-error', e);
+  } catch (error) {
+    showError('sql-error', error);
   }
 }
 
-// ---------- top bar ----------
-
 async function checkHealth() {
-  const el = $('db-status');
+  const status = $('db-status');
   try {
     await api('/api/health');
-    el.textContent = 'connected';
-    el.className = 'ok';
-  } catch (e) {
-    el.textContent = 'not connected';
-    el.className = 'bad';
+    status.textContent = 'database connected';
+    status.className = 'ok';
+  } catch (_) {
+    status.textContent = 'database offline';
+    status.className = 'bad';
   }
 }
 
 async function resetDemo() {
+  if (!window.confirm('Restore the sample trips, seats and tickets? This replaces the current demo data.')) return;
   $('book-error').textContent = '';
   try {
     await post('/api/reset', {});
@@ -424,12 +412,17 @@ async function resetDemo() {
     state.seatId = null;
     state.selectedBookingId = null;
     $('btn-cancel').disabled = true;
-    await loadFlights();
-    await refreshAfterAction();
-  } catch (e) { showError('book-error', e); }
+    $('audit-list').textContent = '';
+    await loadTrips();
+    await Promise.all([loadPassengers(), refreshTable()]);
+    if (typeof loadSiteTrips === 'function') await loadSiteTrips();
+    if (typeof loadMyTickets === 'function') await loadMyTickets();
+    $('site-error').textContent = '';
+  } catch (error) {
+    showError('book-error', error);
+    showError('site-error', error);
+  }
 }
-
-// ---------- wiring ----------
 
 function pollEverything() {
   refreshTable();
@@ -438,12 +431,13 @@ function pollEverything() {
   checkHealth();
 }
 
-function init() {
-  $('flight-select').addEventListener('change', (e) => {
-    state.flightId = Number(e.target.value);
+function initConsole() {
+  $('trip-select').addEventListener('change', (event) => {
+    state.tripId = Number(event.target.value) || null;
     state.seatId = null;
     state.selectedBookingId = null;
     $('btn-cancel').disabled = true;
+    $('seat-hint').textContent = 'Available seats can be booked. Select a booked seat to cancel.';
     refreshSeatMap();
   });
   $('btn-book').addEventListener('click', () => runBook(false));
@@ -451,26 +445,31 @@ function init() {
   $('btn-cancel').addEventListener('click', runCancel);
   $('btn-isolation').addEventListener('click', runIsolationDemo);
   $('btn-run').addEventListener('click', runQuery);
-  $('sql-input').addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runQuery(); }
+  $('sql-input').addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      event.preventDefault();
+      runQuery();
+    }
   });
   $('btn-reset').addEventListener('click', resetDemo);
-  for (const b of document.querySelectorAll('button[data-demo]')) {
-    b.addEventListener('click', () => runConceptDemo(b.dataset.demo));
+  for (const button of document.querySelectorAll('button[data-demo]')) {
+    button.addEventListener('click', () => runConceptDemo(button.dataset.demo));
   }
-  for (const b of document.querySelectorAll('button[data-norm]')) {
-    b.addEventListener('click', () => loadNormalizationQuery(b.dataset.norm));
+  for (const button of document.querySelectorAll('button[data-norm]')) {
+    button.addEventListener('click', () => loadNormalizationQuery(button.dataset.norm));
   }
-  for (const b of $('log-tabs').querySelectorAll('button')) {
-    b.addEventListener('click', () => setLogTab(b.dataset.log));
+  for (const button of $('log-tabs').querySelectorAll('button')) {
+    button.addEventListener('click', () => setLogTab(button.dataset.log));
   }
+
   renderTableTabs();
-  loadFlights();
-  loadPassengers();
+  loadTrips().catch((error) => showError('book-error', error));
+  loadPassengers().catch((error) => showError('book-error', error));
   refreshTable();
   pollAudit();
   checkHealth();
-  setInterval(pollEverything, 2000);
+  window.addEventListener('busnation:passengers-changed', () => loadPassengers());
+  window.setInterval(pollEverything, 2500);
 }
 
-init();
+initConsole();

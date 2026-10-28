@@ -1,7 +1,7 @@
 {
-  "name": "skyledger-rdbms-demo",
+  "name": "busnation",
   "version": "1.0.0",
-  "description": "Local teaching demo of RDBMS concepts (normalization, transactions, ACID, constraints, triggers, locking) with an airline seat booking app.",
+  "description": "BusNation intercity bus ticket booking and RDBMS teaching demo.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

@@ -1,1332 +1,191 @@
-PROJECT_EXPLAINED.TXT -- SKYLEDGER (airline seat booking, RDBMS teaching demo)
-Written for a student presenting this project to a teacher. Plain language.
+BUSNATION — BUS TICKETING SYSTEM AND RDBMS DEMO
+============================================================
 
-========================================================================
-A. OVERVIEW
-========================================================================
+A. WHAT THE PROJECT DOES
+------------------------------------------------------------
 
-SKYLEDGER is a small airline seat booking app that runs completely on one
-computer. You click buttons in a browser, the browser talks to a Node.js
-server, the server runs SQL against a local MySQL 8 database, and the screen
-shows the database changing live: tables, an audit log, MySQL's own query
-log, and the step-by-step trace of every transaction.
+BUSNATION is a local intercity bus ticketing app. A passenger browses trips,
+checks live seats, selects a passenger, adds optional luggage, and confirms a
+ticket. Tickets can be cancelled without deleting their history.
 
-The point of the project is not the airline. The point is to demonstrate,
-with real data that visibly changes:
+The app also makes its database work visible for a class presentation:
+tables, SQL, database constraints, transaction traces, row locks, and an
+audit log. A booking website and an operations console use the same API and
+MySQL database.
 
-- relational design: normalization from an unnormalized table to 3NF
-- integrity: primary keys, foreign keys, UNIQUE, CHECK, NOT NULL, ENUM
-- transactions and ACID: BEGIN, COMMIT, ROLLBACK, atomicity, durability
-- concurrency: row locks with SELECT ... FOR UPDATE, lock waits
-- automation inside the database: triggers writing an audit log
-- logging: a trigger-based audit log versus MySQL's general query log
+Architecture:
 
-Everything is visible: every SQL statement is written by hand in the code,
-and the app can even run raw SQL that you type.
+    Browser (public/index.html, site.js, app.js)
+        -> Express API (server.js)
+        -> MySQL pool and table whitelist (db.js)
+        -> busnation database (schema.sql + seed.sql)
 
-========================================================================
-B. DATABASE CONCEPTS (EXPLAINED COMPLETELY)
-========================================================================
+B. PROJECT FILES
+------------------------------------------------------------
 
-------------------------------------------------------------------------
-B1. Tables, primary keys, foreign keys, ON DELETE RESTRICT
-------------------------------------------------------------------------
+    public/index.html      Booking site and RDBMS console markup
+    public/site.js         Trips, seat map, passenger and ticket flow
+    public/app.js          Operations actions, SQL, table explorer and logs
+    public/style.css       Responsive BUSNATION visual styles
+    server.js              Express routes and transaction logic
+    db.js                  MySQL pool, safe table-read whitelist, helpers
+    schema.sql             Tables, keys, constraints and triggers
+    seed.sql               Repeatable demo data
+    sql/1nf.sql             1NF luggage-list view
+    sql/2nf.sql             2NF trip-fact views
+    sql/3nf.sql             3NF passenger/trip views
+    README.md               Setup and quick start
 
-Definition. A table stores rows of one entity type. The PRIMARY KEY is the
-column (or columns) that uniquely identifies a row; it can never be NULL and
-never repeat. A FOREIGN KEY is a column that must contain a value that exists
-in another table's key column; the database enforces this itself.
+C. THE DATABASE MODEL
+------------------------------------------------------------
 
-Why it matters. Keys are what make a relational database relational. They
-turn "some text that looks like a flight number" into a checked reference,
-so a booking can never point at a flight that does not exist.
+The busnation database has 11 tables:
 
-In this project. The clearest example is a booking:
+- terminals: boarding and arrival terminals, city and short code.
+- buses: operator, bus name and service type.
+- trips: one scheduled run, its bus, two terminals and departure/arrival.
+- seats: seats and fares for a particular trip; rows 1–2 are front row.
+- passengers: a person's name, unique email and optional phone.
+- bookings: a passenger's confirmed or cancelled ticket and selected seat.
+- payments: one simulated payment record per ticket.
+- luggage: optional checked luggage rows and fees.
+- audit_log: trigger-written before/after records for seat and ticket data.
+- unnormalized_bookings: intentionally repeated facts for normalization demos.
+- demo_numbers: helper numbers used to split flat luggage lists in the 1NF view.
 
-    CREATE TABLE bookings (
-      booking_id   INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      flight_id    INT UNSIGNED NOT NULL,
-      seat_id      INT UNSIGNED NOT NULL,
-      passenger_id INT UNSIGNED NOT NULL,
-      status       ENUM('CONFIRMED','CANCELLED') NOT NULL DEFAULT 'CONFIRMED',
-      created_at   DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-      CONSTRAINT fk_booking_flight    FOREIGN KEY (flight_id)    REFERENCES flights (flight_id)      ON DELETE RESTRICT,
-      CONSTRAINT fk_booking_seat      FOREIGN KEY (seat_id)      REFERENCES seats (seat_id)          ON DELETE RESTRICT,
-      CONSTRAINT fk_booking_passenger FOREIGN KEY (passenger_id) REFERENCES passengers (passenger_id) ON DELETE RESTRICT
-    ) ENGINE = InnoDB;
+The sample data has six terminals, three buses, three trips, 72 seats, six
+passengers and four example tickets. It covers Mumbai–Pune, Delhi–Jaipur, and
+Bengaluru–Chennai.
 
-Line by line:
-- CREATE TABLE bookings: makes a new table named bookings.
-- booking_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY: the id column holds
-  whole numbers (INT UNSIGNED means no negatives), the database fills it
-  automatically 1, 2, 3 ... (AUTO_INCREMENT), and it is the primary key, so
-  every booking has a unique, non-NULL id.
-- flight_id INT UNSIGNED NOT NULL: which flight this booking is for; the
-  value cannot be empty (NOT NULL). It is a foreign key, see below.
-- seat_id / passenger_id: same idea -- which seat and which passenger.
-- status ENUM('CONFIRMED','CANCELLED') NOT NULL DEFAULT 'CONFIRMED': the
-  column may hold only those two strings; a new row that does not say
-  otherwise gets 'CONFIRMED'.
-- created_at DATETIME(3) ... DEFAULT CURRENT_TIMESTAMP(3): the database
-  stamps the insert time with millisecond precision by itself.
-- CONSTRAINT fk_booking_flight FOREIGN KEY (flight_id) REFERENCES flights
-  (flight_id): MySQL must reject any booking whose flight_id does not exist
-  in flights. It raises error 1452 if you try.
-- ON DELETE RESTRICT: if someone tries to DELETE the parent row (the flight,
-  the seat, the passenger) while a booking still references it, MySQL
-  refuses with error 1451. Children cannot be orphaned.
-- ENGINE = InnoDB: InnoDB is the storage engine that provides transactions,
-  row locks and foreign keys. MyISAM, the old default, offers none of these.
+D. NORMALIZATION
+------------------------------------------------------------
 
-What the output looks like. Try the FK demo button (or type):
-    INSERT INTO flights (flight_no, origin_id, dest_id, departs_at)
-    VALUES ('SK999', 999, 2, '2026-12-01 09:00:00');
-Airport 999 does not exist, so MySQL answers:
-    Error 1452: Cannot add or update a child row: a foreign key constraint
-    fails (`skyledger`.`flights`, CONSTRAINT `fk_flight_origin`...)
+unnormalized_bookings repeats passenger, operator, trip, route, seat, fare and
+payment details in every row. Its luggage column can hold a comma-separated
+list. This is the deliberately flawed teaching example.
 
-Say out loud: "Every booking points at a real flight, seat and passenger,
-and the database itself -- not my JavaScript -- refuses anything else,
-including deleting a parent that is still referenced."
+- 1NF: sql/1nf.sql creates bookings_1nf, turning each luggage item into its
+  own row. demo_numbers contains 1–50; empty luggage produces one empty item.
+- 2NF: sql/2nf.sql separates trip/route facts from ticket facts in trips_2nf
+  and bookings_2nf.
+- 3NF: sql/3nf.sql separates passengers_3nf and trips_3nf from bookings_3nf.
+  The lesson views use passenger_email as a stable business-key reference;
+  the real application uses passenger_id as its primary/foreign key.
 
-------------------------------------------------------------------------
-B2. Normalization: 1NF, 2NF, 3NF
-------------------------------------------------------------------------
+The three view scripts are optional. Run them after schema.sql and seed.sql
+to enable those extra tabs in the operations console.
 
-Definition. Normalization is a set of rules for splitting data into tables
-so that each fact is stored exactly once.
+E. INTEGRITY RULES
+------------------------------------------------------------
 
-- 1NF (First Normal Form): every column holds one atomic value; no lists
-  inside a cell, no repeating groups of columns.
-- 2NF (Second Normal Form): 1NF plus every non-key column depends on the
-  WHOLE key (matters when the key is composite).
-- 3NF (Third Normal Form): 2NF plus no non-key column depends on another
-  non-key column (no transitive dependencies).
+MySQL enforces rules independently of the browser:
 
-Why it matters. The unnormalized table shows the three classic anomalies:
+- Primary keys identify each terminal, bus, trip, seat and ticket.
+- Foreign keys stop a trip from using missing terminals/buses and a ticket
+  from referring to a seat on a different trip.
+- UNIQUE(trip_id, seat_no) prevents duplicate seat labels on one trip.
+- passengers.email is UNIQUE; payments.booking_id is UNIQUE.
+- CHECK rules reject same-terminal trips, invalid times, negative fares and
+  luggage weights outside 1–40 kg.
+- active_seat_id is generated as seat_id for CONFIRMED bookings and NULL for
+  CANCELLED bookings. Its unique index makes a seat exclusive even if a write
+  bypasses the Node booking endpoint or races another connection.
+- Triggers also reject a duplicate confirmed seat with a readable SQLSTATE
+  45000 error. The unique key is the final race-safe guard.
 
-- UPDATE anomaly: the same fact stored in several rows -- change one copy and
-  the table contradicts itself.
-- INSERT anomaly: you cannot store a new fact (a flight) until some unrelated
-  fact (a booking) exists, because the columns are not nullable.
-- DELETE anomaly: deleting one row silently destroys an unrelated fact.
+F. BOOKING TRANSACTION
+------------------------------------------------------------
 
-The demo table. unnormalized_bookings is one flat table:
-
-    CREATE TABLE unnormalized_bookings (
-      unnorm_id       INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      booking_no      VARCHAR(10)   NOT NULL,
-      passenger_name  VARCHAR(120)  NOT NULL,
-      passenger_email VARCHAR(200)  NOT NULL,
-      flight_no       VARCHAR(8)    NOT NULL,
-      origin_city     VARCHAR(100)  NOT NULL,
-      dest_city       VARCHAR(100)  NOT NULL,
-      seat_no         VARCHAR(4)    NOT NULL,
-      fare            DECIMAL(10,2) NOT NULL,
-      payment_status  VARCHAR(20)   NOT NULL,
-      baggage         VARCHAR(100)  NOT NULL DEFAULT ''
-    ) ENGINE = InnoDB;
-
-Passenger contact details, flight route, seat, fare, payment status and even
-a bag list are all in one row, repeated for every booking. The bag column
-holds '15kg,7kg' -- two values in one cell, which already breaks 1NF.
-
-Anomaly 1 -- UPDATE anomaly (button "Update anomaly" loads this):
-    UPDATE unnormalized_bookings
-    SET passenger_email = 'asha.verma@newmail.com'
-    WHERE booking_no = 'BK-1001';
-Line by line: UPDATE names the table; SET assigns the new value to one
-column; WHERE picks the rows -- here exactly one booking. Asha Verma has
-three rows. After this statement the table holds her new email on BK-1001
-and the old email on BK-1002 and BK-1003. Which one is true? Nobody knows.
-Then run:
-    SELECT passenger_name, passenger_email, booking_no
-    FROM unnormalized_bookings
-    WHERE passenger_name = 'Asha Verma';
-You see the contradiction on screen. In the 3NF design the email lives once,
-in passengers.email (UNIQUE), so there is exactly one place to change.
-
-Anomaly 2 -- INSERT anomaly (button "Insert anomaly"):
-    INSERT INTO unnormalized_bookings
-      (booking_no, flight_no, origin_city, dest_city, seat_no, fare,
-       payment_status)
-    VALUES ('BK-1011', 'SK303', 'Delhi', 'Chennai', '1A', 5000.00, 'PENDING');
-Line by line: INSERT INTO names the table and the columns we are filling;
-VALUES gives one value per listed column. We did not list passenger_name or
-passenger_email because nobody has booked yet -- but those columns are NOT
-NULL, so MySQL refuses:
-    Error 1364: Field 'passenger_name' doesn't have a default value
-You literally cannot announce a new flight in this table without inventing a
-passenger. In the 3NF design, flights is an independent table: the seed file
-inserts two flights before any booking exists.
-
-Anomaly 3 -- DELETE anomaly (button "Delete anomaly"):
-    DELETE FROM unnormalized_bookings WHERE flight_no = 'SK202';
-Line by line: DELETE FROM names the table; WHERE picks the rows to remove.
-SK202's route (Mumbai -> Bengaluru) exists ONLY inside these rows. After the
-delete, the route, the departure facts and the fares of SK202 are gone from
-the database even though the flight itself still exists in the real world.
-In the 3NF design, bookings reference flights by key; you can delete every
-booking of SK202 and the flight row survives.
-
-How each normal form fixes it, step by step (files sql/1nf.sql, sql/2nf.sql,
-sql/3nf.sql, each creates a view you can open as a tab):
-
-- 1NF view (bookings_1nf): one row per bag.
-      CREATE OR REPLACE VIEW bookings_1nf AS
-      SELECT
-        u.booking_no, u.passenger_name, u.passenger_email,
-        u.flight_no, u.origin_city, u.dest_city,
-        u.seat_no, u.fare, u.payment_status,
-        n.n AS bag_no,
-        TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(u.baggage, ',', n.n), ',', -1)) AS bag
-      FROM unnormalized_bookings u
-      JOIN demo_numbers n
-        ON n.n <= IF(u.baggage = '', 1,
-                     1 + LENGTH(u.baggage) - LENGTH(REPLACE(u.baggage, ',', '')));
-  Line by line: a VIEW is a saved SELECT, not a copy of data. SELECT lists
-  the flat columns plus bag_no (the position of the bag) and bag (the value).
-  SUBSTRING_INDEX(u.baggage, ',', n.n) keeps the first n pieces of the list;
-  the second SUBSTRING_INDEX with -1 takes the last of those, i.e. the n-th
-  piece; TRIM strips spaces. demo_numbers is a helper table holding 1..8.
-  The JOIN condition says: repeat the booking row once per bag it lists
-  (LENGTH minus LENGTH of the list with commas removed = number of commas,
-  plus 1 = number of bags; an empty list counts as one row with an empty
-  bag). Every cell is now atomic: 1NF.
-- 2NF views: flights_2nf holds each flight's route once
-  (SELECT DISTINCT flight_no, origin_city, dest_city FROM
-  unnormalized_bookings; -- DISTINCT collapses the repeats), and
-  bookings_2nf keeps only booking facts. Each fact now sits with the entity
-  it belongs to.
-- 3NF views: passengers_3nf (one row per person with the email), flights_3nf
-  (route per flight), bookings_3nf (booking facts plus references). No fact
-  is stored in two places. The real skyledger tables (passengers, flights,
-  seats, bookings, payments, baggage) are exactly this shape, materialized
-  with keys and constraints.
-
-Say out loud: "One fact, one place. The flat table contradicts itself when
-we change one row, refuses new flights, and loses flights when we delete the
-last booking -- the normalized tables fix all three."
-
-------------------------------------------------------------------------
-B3. Constraints: UNIQUE, CHECK, NOT NULL, ENUM and their error codes
-------------------------------------------------------------------------
-
-Definition. A constraint is a rule the database checks on every write,
-independent of any application code.
-
-In this project (button -> statement -> raw MySQL error):
-
-- FK: the flights demo insert above -> error 1452 (ER_NO_REFERENCED_ROW_2).
-- UNIQUE: email of a passenger is UNIQUE, so this fails:
-      INSERT INTO passengers (name, email, phone)
-      VALUES ('Demo Duplicate', 'asha@mail.com', NULL);
-  -> error 1062 (ER_DUP_ENTRY): Duplicate entry 'asha@mail.com' for key
-  'passengers.email'. seats also has a composite UNIQUE:
-      UNIQUE (flight_id, seat_no)
-  -- the same seat NUMBER may exist on two flights, but never twice on one
-  flight. This is a two-column key: only the combination must be unique.
-- CHECK: baggage weight is limited, and payments can never be negative:
-      kg INT NOT NULL ... CONSTRAINT chk_kg_range CHECK (kg BETWEEN 1 AND 40)
-      CONSTRAINT chk_amount_nonneg CHECK (amount >= 0)
-      CONSTRAINT chk_origin_diff_dest CHECK (origin_id <> dest_id)
-  The baggage demo inserts kg = 50 -> error 3819 (ER_CHECK_CONSTRAINT_VIOLATED).
-- NOT NULL: demo columns that cannot be empty, e.g. unnormalized_bookings.
-  passenger_name -> error 1364 when omitted with no default (and 1048 when
-  you explicitly try to store NULL).
-- ENUM: seats.class only allows 'ECONOMY','BUSINESS'. Inserting 'FIRST'
-  -> error 1265 (WARN_DATA_TRUNCATED): Data truncated for column 'class'.
-
-Why it matters: the last line of defense is in the database. Any client --
-the app, a script, a DBA in a console -- gets the same refusal.
-
-Say out loud: "Integrity is not an application feature here; it is a
-property of the schema, and MySQL answers with numbered errors."
-
-------------------------------------------------------------------------
-B4. Transactions: BEGIN, COMMIT, ROLLBACK
-------------------------------------------------------------------------
-
-Definition. A transaction groups statements into one unit: either every
-statement in the group becomes permanent (COMMIT) or none of it ever happened
-(ROLLBACK). BEGIN starts it.
-
-The booking flow (POST /api/book) runs in ONE transaction, visible in the
-"Transaction trace" tab:
+POST /api/book performs these steps on one dedicated MySQL connection:
 
     BEGIN
-    SELECT seat_id, flight_id, seat_no, fare FROM seats WHERE seat_id = ?
-    FOR UPDATE
-    INSERT INTO bookings (flight_id, seat_id, passenger_id, status)
-    VALUES (?, ?, ?, 'CONFIRMED')
-    INSERT INTO payments (booking_id, amount, status) VALUES (?, ?, 'PAID')
-    INSERT INTO baggage (booking_id, kg, fee) VALUES (?, ?, ?)
+    SELECT seat ... FOR UPDATE
+    INSERT booking
+    INSERT payment
+    INSERT optional luggage
     COMMIT
 
-Line by line:
-- BEGIN: open a transaction on this connection. Nothing after this is
-  visible to other connections until COMMIT.
-- SELECT ... FROM seats WHERE seat_id = ? FOR UPDATE: read the seat row AND
-  take an exclusive row lock on it. The ? is a placeholder -- the driver
-  sends the value separately, which is what prevents SQL injection. FOR
-  UPDATE matters because two clerks could be booking the same seat at the
-  same moment; the second one waits here until the first commits or rolls
-  back (see B6).
-- INSERT INTO bookings ...: write the booking row. The trigger
-  trg_bookings_no_double_seat (B7) checks the seat again at this moment and
-  aborts with SIGNAL 45000 if it already has a CONFIRMED booking.
-- INSERT INTO payments ...: the money row, amount = the fare we just read
-  with the lock held.
-- INSERT INTO baggage ...: only if a bag weight was given; fee is a simple
-  50.00 per kg.
-- COMMIT: make all of it permanent at once.
-
-The "Book with forced failure" button does exactly the same thing, but
-throws a deliberate error after one of the steps (booking / payment /
-baggage). The server then runs:
-
-    ROLLBACK
-
-and MySQL erases every uncommitted insert of that transaction. The trace
-shows ROLLBACK; the tables and even the audit log show nothing, because the
-trigger-written audit rows were part of the same transaction.
-
-Say out loud: "Booking, payment and baggage go in one unit. If any step
-fails, the database itself undoes the others -- zero partial rows."
-
-------------------------------------------------------------------------
-B5. ACID, each tied to one demo button
-------------------------------------------------------------------------
-
-- Atomicity -- all or nothing. Button: "Book with forced failure" (after
-  booking / after payment / after baggage). Evidence: trace shows ROLLBACK;
-  bookings, payments, baggage, audit_log all unchanged.
-- Consistency -- data always satisfies the rules. Buttons: FK / UNIQUE /
-  CHECK / Trigger errors. Evidence: MySQL refuses each illegal write with a
-  specific error code.
-- Isolation -- parallel work does not corrupt each other. Button:
-  "Isolation demo". Evidence: connection B freezes at LOCK WAIT while A holds
-  the row lock, then fails after A commits.
-- Durability -- once committed, it survives a crash. Demo: book a seat, stop
-  Node (Ctrl-C), start it again (npm start), the booking is still there.
-  Evidence: the row is read back after restart. The commit had already been
-  written to InnoDB's redo log on disk before Node acknowledged it.
-
-Say out loud: "Each letter of ACID is one button in the left column."
-
-------------------------------------------------------------------------
-B6. Locking and isolation
-------------------------------------------------------------------------
-
-Definition. InnoDB locks rows, not whole tables. SELECT ... FOR UPDATE takes
-an exclusive (X) row lock; another transaction asking for the same row's
-lock waits until the holder commits or rolls back, or until
-innodb_lock_wait_timeout seconds pass (then error 1205).
-
-The isolation demo (POST /api/isolation-demo) runs two real connections:
-
-    Connection A: SET SESSION innodb_lock_wait_timeout = 5
-                  BEGIN
-                  SELECT seat_no FROM seats WHERE seat_id = ? FOR UPDATE
-                  INSERT INTO bookings ... (NOT committed yet)
-    Connection B: the exact same booking attempt, one moment later
-                  -> B's SELECT ... FOR UPDATE blocks: A holds the lock
-    (while B waits, the server reads information_schema.INNODB_TRX and shows
-     B's trx_state = LOCK WAIT on screen -- proof, not a claim)
-    Connection A: COMMIT -> booking becomes visible, B unblocks
-    Connection B: the BEFORE INSERT trigger now SEES A's committed booking
-                  -> SIGNAL SQLSTATE '45000' -> B gets error 1644
-                  -> B's transaction ROLLBACKs
-
-Line by line: SET SESSION innodb_lock_wait_timeout = 5 limits THIS session's
-lock waits to 5 seconds so nothing can hang the demo. information_schema.
-INNODB_TRX is MySQL's live table of running InnoDB transactions;
-trx_mysql_thread_id is the connection id, which is how the demo finds B's
-row.
-
-The isolation level in use is InnoDB's default REPEATABLE READ. What it
-allows: other connections keep reading old committed data without waiting
-(consistent reads never block). What it prevents: dirty reads (reading
-uncommitted data) and non-repeatable reads (a row you read twice changing
-under you). Phantom-ish surprises are prevented here concretely by row
-locks: B cannot slip a second booking past A because B must take the same
-row lock before its insert, and the trigger re-check runs only after B gets
-that lock.
-
-Why the app locks at all if the trigger exists: the trigger's check and the
-insert are two separate steps; without the lock, two transactions can pass
-the check at the same instant and both insert (check-then-act race). The
-row lock makes the two steps effectively one.
-
-Say out loud: "A holds the lock, B is measurably in LOCK WAIT, A commits,
-and B's trigger -- now seeing A's booking -- rejects it with 45000."
-
-------------------------------------------------------------------------
-B7. Triggers
-------------------------------------------------------------------------
-
-Definition. A trigger is a small procedure the database executes
-automatically on every INSERT / UPDATE / DELETE of a table. Application code
-cannot forget to call it.
-
-This project has 11 triggers. Every audit trigger writes ONE audit_log row
-per changed row.
-
-1) trg_bookings_no_double_seat -- BEFORE INSERT on bookings. Fires before
-the row is written. Full code:
-
-    CREATE TRIGGER trg_bookings_no_double_seat BEFORE INSERT ON bookings
-    FOR EACH ROW
-    BEGIN
-      IF NEW.status = 'CONFIRMED' AND EXISTS (
-        SELECT 1 FROM bookings b
-        WHERE b.seat_id = NEW.seat_id AND b.status = 'CONFIRMED'
-      ) THEN
-        SIGNAL SQLSTATE '45000'
-          SET MESSAGE_TEXT = 'Seat already has a CONFIRMED booking';
-      END IF;
-    END
-
-Line by line: BEFORE INSERT ON bookings = run before every insert; FOR EACH
-ROW = once per attempted row; NEW is the row being inserted. IF the new
-booking is CONFIRMED and EXISTS another confirmed booking for the same seat
-(EXISTS is true when the subquery returns at least one row) THEN SIGNAL
-SQLSTATE '45000' raises an error with MySQL's standard "application error"
-SQLSTATE; SET MESSAGE_TEXT supplies the human-readable message. The insert
--- and the whole surrounding transaction -- is aborted. Error seen by the
-client: errno 1644 (ER_SIGNAL_EXCEPTION), SQLSTATE 45000.
-
-2) trg_bookings_no_reconfirm -- BEFORE UPDATE on bookings. Same guard for
-the case where a CANCELLED booking is set back to CONFIRMED while the seat
-was taken by someone else in the meantime. It excludes its own row from the
-check (b.booking_id <> NEW.booking_id).
-
-3) trg_bookings_after_insert -- AFTER INSERT on bookings:
-
-    INSERT INTO audit_log (table_name, action, row_id, old_data, new_data)
-    VALUES ('bookings', 'INSERT', NEW.booking_id, NULL,
-            JSON_OBJECT('flight_id', NEW.flight_id, 'seat_id', NEW.seat_id,
-                        'passenger_id', NEW.passenger_id, 'status', NEW.status))
-
-Line by line: fires after the row is actually stored; JSON_OBJECT builds a
-JSON document from key/value pairs -- the after-image of the row; old_data
-is NULL because there was no old row. Trigger-written audit rows live inside
-the same transaction: if the booking rolls back, its audit rows vanish too
-(visible with the forced-failure button).
-
-4) trg_bookings_after_update -- AFTER UPDATE on bookings. Writes action
-'UPDATE' with old_data = JSON_OBJECT('status', OLD.status) and new_data =
-JSON_OBJECT('status', NEW.status). OLD is the row before the change, NEW
-after. This is what makes a cancellation visible in the audit log.
-
-5) trg_bookings_after_delete -- AFTER DELETE on bookings. Writes 'DELETE'
-with the old row's facts and NULL new_data.
-
-6) trg_payments_after_insert -- AFTER INSERT on payments. Logs booking_id,
-amount, status. This is why a completed booking shows TWO audit rows
-(booking + payment), three with a bag.
-
-7) trg_payments_after_update -- AFTER UPDATE on payments. Logs the void of a
-payment: status PAID -> FAILED when a booking is cancelled.
-
-8) trg_baggage_after_insert -- AFTER INSERT on baggage. Logs kg and fee.
-(Added so a booking with a bag produces exactly three audit rows.)
-
-9) trg_baggage_after_delete -- AFTER DELETE on baggage. Logs the removed bag.
-
-10) trg_seats_after_insert -- AFTER INSERT on seats. Logs the new seat.
-11) trg_seats_after_update -- AFTER UPDATE on seats. Logs fare changes
-(old_data/new_data with the fare).
-
-All audit triggers share this shape: single INSERT INTO audit_log statement,
-NEW.* for inserts, OLD.* + NEW.* for updates, OLD.* for deletes. The
-audit_log table itself:
-
-    CREATE TABLE audit_log (
-      log_id     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      table_name VARCHAR(64) NOT NULL,
-      action     ENUM('INSERT','UPDATE','DELETE') NOT NULL,
-      row_id     BIGINT UNSIGNED NOT NULL,
-      old_data   JSON NULL,
-      new_data   JSON NULL,
-      logged_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-    ) ENGINE = InnoDB;
-
-Say out loud: "The audit trail is written by the database engine itself --
-even if application code changes, every row-level change is still logged."
-
-------------------------------------------------------------------------
-B8. Logs: audit_log (trigger-based) vs the general query log
-------------------------------------------------------------------------
-
-- audit_log is APPLICATION-level history, written by triggers. It stores the
-  meaning of each change: which table, which action, which row, the before
-  and after images as JSON, millisecond timestamp. It is small and permanent
-  until you clear it. Read it in the "Audit log" tab or:
-      SELECT log_id, table_name, action, row_id, old_data, new_data, logged_at
-      FROM audit_log WHERE log_id > ? ORDER BY log_id DESC LIMIT 100
-- The general query log is SERVER-level traffic. MySQL writes every statement
-  it receives -- every SELECT, INSERT, BEGIN, COMMIT -- with a timestamp and
-  the connecting user. It is switched off by default (it grows fast). Enable:
-      SET GLOBAL log_output = 'TABLE';
-      SET GLOBAL general_log = 'ON';
-  Then read the mysql.general_log table (demo step 8):
-      SELECT event_time, user_host, command_type,
-             CAST(argument AS CHAR CHARACTER SET utf8mb4) AS argument
-      FROM mysql.general_log
-      WHERE user_host LIKE 'root%' AND argument NOT LIKE '%general_log%'
-      ORDER BY event_time DESC, thread_id DESC LIMIT 30
-  Line by line: event_time is when MySQL received the statement; user_host
-  says who connected; command_type is Query / Connect / Quit; argument is
-  the statement text (CAST turns the stored bytes into readable text);
-  WHERE keeps only this app's user and hides the log-reading queries
-  themselves so the log does not fill with its own polling; ORDER BY shows
-  the newest first.
-- The difference in one line: audit_log answers "what rows changed and what
-  did they look like", the general log answers "what SQL did the server
-  receive, from whom, and when". The audit log is chosen, structured and
-  transactional; the general log is everything, raw, and independent of
-  transactions (it shows statements from transactions that later rolled
-  back).
-
-Say out loud: "Two different layers of logging: triggers log business
-changes, MySQL's general log logs every statement the server receives."
-
-------------------------------------------------------------------------
-B9. Indexes (created automatically by PK / UNIQUE / FK)
-------------------------------------------------------------------------
-
-Definition. An index is a sorted structure (a B-tree in InnoDB) that lets
-MySQL find rows by key without scanning the whole table.
-
-Why it matters here. You never wrote CREATE INDEX, yet indexes exist:
-
-- every PRIMARY KEY is automatically the table's clustered index (the table
-  data itself is stored in primary-key order);
-- every UNIQUE constraint (passengers.email, flights.flight_no,
-  uq_flight_seat (flight_id, seat_no), payments.booking_id) is backed by a
-  unique index -- that index is also HOW MySQL detects duplicates instantly
-  when enforcing error 1062;
-- every FOREIGN KEY gets an index on its columns (visible as KEY
-  fk_booking_seat (seat_id) etc. in SHOW CREATE TABLE bookings) because FK
-  checks must find parent/child rows quickly.
-
-Demonstrate in a MySQL console with:
-    SHOW CREATE TABLE bookings;
-and point at the KEY lines. (The app's SQL box deliberately only allows
-SELECT / INSERT / UPDATE / DELETE, so run SHOW in the console.) Also: the
-double-booking guard's subquery
-WHERE seat_id = ... AND status = 'CONFIRMED' is fast because bookings has
-the fk_booking_seat index on seat_id.
-
-Say out loud: "Keys and constraints are not just rules -- the database
-builds indexes to enforce them efficiently."
-
-------------------------------------------------------------------------
-B10. Seed and reset statements
-------------------------------------------------------------------------
-
-seed.sql is idempotent -- it can run on a fresh database or on one full of
-demo leftovers, and always ends in the same state. How:
-
-    SET FOREIGN_KEY_CHECKS = 0
-    TRUNCATE TABLE audit_log, baggage, payments, bookings, passengers,
-                   seats, flights, airports, unnormalized_bookings,
-                   demo_numbers
-    SET FOREIGN_KEY_CHECKS = 1
-    (then the fixed INSERTs for airports, flights, seats, passengers,
-     bookings + payments + baggage, unnormalized rows, numbers 1..8)
-    TRUNCATE TABLE audit_log
-
-Line by line: TRUNCATE empties a table AND resets its AUTO_INCREMENT
-counters, which is why demo ids stay small after a reset. TRUNCATE is
-refused on a parent table that a foreign key references, even when the
-child table is empty, so the seed temporarily sets FOREIGN_KEY_CHECKS = 0
-for this session only, truncates parents and children together, and turns
-the checks straight back on. The final TRUNCATE audit_log removes the rows
-the INSERT triggers wrote during seeding, so the audience sees only demo
-activity in the log.
-
-The "Reset demo data" button (POST /api/reset) runs exactly this seed.sql
-on a dedicated connection, then also clears the server-side log:
-
-    TRUNCATE TABLE mysql.general_log
-
-so the general-log demo starts empty too. It needs a separate connection
-because seed.sql is many statements at once and the app's own pool is
-configured to reject multi-statement text (a second defense behind the
-/api/query verb check).
-
-------------------------------------------------------------------------
-B11. THE COMPLETE SCHEMA, LINE BY LINE (schema.sql)
-------------------------------------------------------------------------
-
-This is schema.sql from top to bottom, every line explained. Use it as the
-reading companion when the teacher says "open schema.sql and explain it".
-
-The file header (comments):
-
-    -- schema.sql: creates the skyledger database, all 3NF tables,
-    -- constraints and triggers.
-    -- Run once before seed.sql (it drops and recreates the whole database):
-    --   mysql -u root -p < schema.sql
-    -- NOTE: triggers below use DELIMITER because their bodies contain ';'
-    -- plain `mysql < schema.sql` handles that; run this file only via the
-    -- mysql CLI.
-
-- Lines beginning with -- are comments; the mysql client skips them.
-- The third comment is the exact command that runs the file: the mysql
-  client reads the file and executes its statements in order.
-
-    DROP DATABASE IF EXISTS skyledger;
-
-- DROP DATABASE deletes the database and every table in it.
-- IF EXISTS prevents an error on a fresh machine where it does not exist
-  yet. WHY first: it makes the script re-runnable -- running it twice can
-  never leave a stale old table behind.
-
-    CREATE DATABASE skyledger CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
-- CREATE DATABASE creates an empty database.
-- CHARACTER SET utf8mb4: text is stored as full Unicode (4-byte UTF-8, so
-  names in any script are safe; the older 3-byte utf8 is not).
-- COLLATE utf8mb4_unicode_ci: the string comparison rules; _ci means
-  case-insensitive, so 'Asha@Mail.com' equals 'asha@mail.com' in UNIQUE
-  checks and WHERE comparisons.
-
-    USE skyledger;
-
-- USE makes every following statement run inside this database, without a
-  skyledger. prefix on each table name.
-
-TABLE 1: airports
-
-    CREATE TABLE airports (
-      airport_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      code       CHAR(3)       NOT NULL UNIQUE,
-      city       VARCHAR(100)  NOT NULL
-    ) ENGINE = InnoDB;  -- InnoDB: transactions, row locks and foreign keys
-
-Line by line:
-- CREATE TABLE airports ( ... ): defines a new table named airports; inside
-  the brackets, every line declares one column or one constraint.
-- airport_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY: the identifier column.
-  INT = 32-bit whole number. UNSIGNED = no negative values (ids never need
-  to be negative; this doubles the positive range). AUTO_INCREMENT = MySQL
-  assigns 1, 2, 3 ... automatically when an INSERT omits the column.
-  PRIMARY KEY = the unique row identifier: never NULL, never duplicated;
-  InnoDB physically stores the table sorted by this column (the clustered
-  index). It is a "surrogate" key -- meaningless to the business, it only
-  identifies the row.
-- code CHAR(3) NOT NULL UNIQUE: CHAR(3) = fixed width, exactly three
-  characters -- right for codes like 'DEL' (every value the same length,
-  fast to compare). NOT NULL = required. UNIQUE = a second 'DEL' is
-  rejected with error 1062. This is the business key, the value humans use.
-- city VARCHAR(100) NOT NULL: VARCHAR = variable-length text up to 100
-  characters; only the bytes actually used are stored, unlike CHAR.
-- ) ENGINE = InnoDB;: picks the storage engine. InnoDB provides
-  transactions, row locks and foreign keys; the old default MyISAM offers
-  none of these. The trailing comment documents WHY InnoDB.
-
-TABLE 2: flights
-
-    CREATE TABLE flights (
-      flight_id  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      flight_no  VARCHAR(8)   NOT NULL UNIQUE,
-      origin_id  INT UNSIGNED NOT NULL,
-      dest_id    INT UNSIGNED NOT NULL,
-      departs_at DATETIME     NOT NULL,
-      CONSTRAINT fk_flight_origin FOREIGN KEY (origin_id) REFERENCES airports (airport_id) ON DELETE RESTRICT,
-      CONSTRAINT fk_flight_dest   FOREIGN KEY (dest_id)   REFERENCES airports (airport_id) ON DELETE RESTRICT,
-      CONSTRAINT chk_origin_diff_dest CHECK (origin_id <> dest_id)
-    ) ENGINE = InnoDB;
-
-Line by line:
-- flight_id ... PRIMARY KEY: the same surrogate auto-increment id pattern.
-- flight_no VARCHAR(8) NOT NULL UNIQUE: the human-readable code ('SK101').
-  VARCHAR because flight numbers vary in length; UNIQUE so a second SK101
-  is impossible (error 1062).
-- origin_id / dest_id INT UNSIGNED NOT NULL: the two endpoints of the
-  route. As plain columns they mean nothing yet -- the CONSTRAINT lines
-  below turn them into foreign keys. NOT NULL because a flight without an
-  origin is meaningless.
-- departs_at DATETIME NOT NULL: date plus time of departure. DATETIME
-  stores wall-clock time without timezone conversion (fine for a local
-  demo).
-- CONSTRAINT fk_flight_origin FOREIGN KEY (origin_id) REFERENCES airports
-  (airport_id): names the constraint (fk_ = table_relation convention),
-  declares origin_id as a foreign key pointing at airports.airport_id.
-  From now on MySQL refuses any origin_id that does not exist (error 1452)
-  -- referential integrity, enforced by the database.
-- ON DELETE RESTRICT: deleting an airport that flights still reference is
-  refused with error 1451. The parent cannot vanish while children exist.
-  (The alternatives would be CASCADE -- delete the children too -- or SET
-  NULL; RESTRICT is the safe choice for a booking system.)
-- CONSTRAINT fk_flight_dest ...: the destination gets its own identical
-  foreign key. Two constraints, not one, because one row holds two airport
-  references.
-- CONSTRAINT chk_origin_diff_dest CHECK (origin_id <> dest_id): a CHECK
-  constraint is a boolean rule every row must satisfy. <> means "not
-  equal": a flight cannot depart from and arrive at the same airport.
-  Violation raises error 3819.
-
-TABLE 3: seats
-
-    CREATE TABLE seats (
-      seat_id   INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      flight_id INT UNSIGNED NOT NULL,
-      seat_no   VARCHAR(4)   NOT NULL,               -- '1A' .. '6D'
-      class     ENUM('ECONOMY','BUSINESS') NOT NULL, -- ENUM: only these values are legal
-      fare      DECIMAL(10,2) NOT NULL,              -- DECIMAL, not FLOAT: exact money
-      CONSTRAINT uq_flight_seat UNIQUE (flight_id, seat_no),
-      CONSTRAINT fk_seat_flight FOREIGN KEY (flight_id) REFERENCES flights (flight_id) ON DELETE RESTRICT
-    ) ENGINE = InnoDB;
-
-Line by line:
-- seat_id ... PRIMARY KEY: the surrogate id again.
-- flight_id INT UNSIGNED NOT NULL: which flight this seat belongs to (the
-  FK line below enforces it).
-- seat_no VARCHAR(4) NOT NULL: the label '1A' .. '6D'; VARCHAR because it
-  mixes a digit and a letter.
-- class ENUM('ECONOMY','BUSINESS') NOT NULL: ENUM = the column may hold
-  ONLY the listed strings; anything else is refused (error 1265 for an
-  invalid value). Internally MySQL stores the tiny integer 1 or 2, so ENUM
-  is compact. It is a constraint disguised as a data type.
-- fare DECIMAL(10,2) NOT NULL: exact fixed-point money -- up to 10 digits
-  total, 2 of them after the decimal point (max 99,999,999.99). WHY not
-  FLOAT/DOUBLE: those are binary approximations in which 0.1 is not exactly
-  representable, so money arithmetic drifts. DECIMAL stores digits
-  exactly; 8500.00 stays 8500.00.
-- CONSTRAINT uq_flight_seat UNIQUE (flight_id, seat_no): a COMPOSITE UNIQUE
-  over two columns. Neither column alone is unique -- '2A' exists on every
-  flight -- but the PAIR (flight 1, '2A') must be unique. This is what
-  makes a seat identifiable, and it backs the double-booking logic.
-  Violation: error 1062.
-- CONSTRAINT fk_seat_flight ... ON DELETE RESTRICT: seats point at a real
-  flight; a flight that still has seats cannot be deleted.
-
-TABLE 4: passengers
-
-    CREATE TABLE passengers (
-      passenger_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      name         VARCHAR(120) NOT NULL,
-      email        VARCHAR(200) NOT NULL UNIQUE,  -- one email = one passenger record
-      phone        VARCHAR(20)  NULL              -- NULL means "not given"
-    ) ENGINE = InnoDB;
-
-- passenger_id ... PRIMARY KEY: the surrogate id.
-- name VARCHAR(120) NOT NULL: the required display name.
-- email VARCHAR(200) NOT NULL UNIQUE: the business key of a person. NOT
-  NULL + UNIQUE together mean every passenger has exactly one email and no
-  two passengers share one. The signup endpoint relies on this: a
-  duplicate email is rejected by MySQL (1062), not by JavaScript.
-- phone VARCHAR(20) NULL: explicitly nullable -- a missing phone is
-  "unknown", which is different from an empty string. NULL is the honest
-  modeling choice, and the column comment says so.
-
-TABLE 5: bookings (the worked example of B1)
-
-    CREATE TABLE bookings (
-      booking_id   INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      flight_id    INT UNSIGNED NOT NULL,
-      seat_id      INT UNSIGNED NOT NULL,
-      passenger_id INT UNSIGNED NOT NULL,
-      status       ENUM('CONFIRMED','CANCELLED') NOT NULL DEFAULT 'CONFIRMED',
-      created_at   DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),  -- ms precision for log ordering
-      CONSTRAINT fk_booking_flight    FOREIGN KEY (flight_id)    REFERENCES flights (flight_id)      ON DELETE RESTRICT,
-      CONSTRAINT fk_booking_seat      FOREIGN KEY (seat_id)      REFERENCES seats (seat_id)          ON DELETE RESTRICT,
-      CONSTRAINT fk_booking_passenger FOREIGN KEY (passenger_id) REFERENCES passengers (passenger_id) ON DELETE RESTRICT
-    ) ENGINE = InnoDB;
-
-New things here (everything else is explained line by line in B1):
-- status ENUM('CONFIRMED','CANCELLED') ... DEFAULT 'CONFIRMED': two legal
-  values, and INSERTs that omit status get 'CONFIRMED' automatically. A
-  cancellation never deletes the row -- it flips the status, so history
-  stays.
-- created_at DATETIME(3) ... DEFAULT CURRENT_TIMESTAMP(3): the (3) is
-  millisecond precision, needed because the demo orders events by time.
-  DEFAULT CURRENT_TIMESTAMP(3) = the database stamps the row at INSERT
-  time -- no application clock involved (one less way to be wrong).
-- Three foreign keys, one per reference: flight, seat, passenger. Each
-  would raise 1452 on a bad value and each blocks deletion of its parent
-  (1451).
-
-TABLE 6: payments
-
-    CREATE TABLE payments (
-      payment_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      booking_id INT UNSIGNED NOT NULL UNIQUE,
-      amount     DECIMAL(10,2) NOT NULL,
-      status     ENUM('PAID','FAILED') NOT NULL DEFAULT 'PAID',
-      paid_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-      CONSTRAINT fk_payment_booking FOREIGN KEY (booking_id) REFERENCES bookings (booking_id) ON DELETE RESTRICT,
-      CONSTRAINT chk_amount_nonneg  CHECK (amount >= 0)
-    ) ENGINE = InnoDB;
-
-New things:
-- booking_id INT UNSIGNED NOT NULL UNIQUE: a column that is a foreign key
-  AND unique at once -- that combination IS the one-to-one relationship.
-  One booking can have at most one payment row; a second is refused (1062).
-  The FK answers "does the parent exist?", UNIQUE adds "at most one child".
-- status ENUM('PAID','FAILED') ... DEFAULT 'PAID': voiding a payment after
-  a cancellation sets FAILED; the row is never deleted, so the audit
-  history survives.
-- CONSTRAINT chk_amount_nonneg CHECK (amount >= 0): no negative payments,
-  enforced by the database itself (error 3819).
-
-TABLE 7: baggage
-
-    CREATE TABLE baggage (
-      baggage_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      booking_id INT UNSIGNED NOT NULL,
-      kg         INT NOT NULL,
-      fee        DECIMAL(10,2) NOT NULL,
-      CONSTRAINT fk_baggage_booking FOREIGN KEY (booking_id) REFERENCES bookings (booking_id) ON DELETE RESTRICT,
-      CONSTRAINT chk_kg_range       CHECK (kg BETWEEN 1 AND 40)
-    ) ENGINE = InnoDB;
-
-New things:
-- No UNIQUE on booking_id, on purpose: a booking may have SEVERAL bags --
-  a one-to-many relationship, unlike payments' one-to-one.
-- kg INT NOT NULL + CHECK (kg BETWEEN 1 AND 40): BETWEEN is inclusive --
-  1 to 40; 0 and 50 are refused (3819). The airline's baggage rule lives
-  in the schema, not in a form validator.
-
-TABLE 8: audit_log
-
-    CREATE TABLE audit_log (
-      log_id     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      table_name VARCHAR(64) NOT NULL,
-      action     ENUM('INSERT','UPDATE','DELETE') NOT NULL,
-      row_id     BIGINT UNSIGNED NOT NULL,          -- PK value of the changed row
-      old_data   JSON NULL,                         -- before-image; NULL for INSERT
-      new_data   JSON NULL,                         -- after-image; NULL for DELETE
-      logged_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-    ) ENGINE = InnoDB;
-
-New things:
-- log_id BIGINT UNSIGNED ...: BIGINT = 64-bit integer; the audit log grows
-  forever, so it gets the bigger type (and its id space can never be
-  confused with the tables' INT ids).
-- table_name VARCHAR(64): which table changed. A text label, NOT a foreign
-  key -- on purpose: audit rows must survive even if a table is renamed or
-  dropped.
-- action ENUM('INSERT','UPDATE','DELETE'): exactly one of the three.
-- row_id BIGINT UNSIGNED NOT NULL: the primary key of the changed row, so
-  each audit entry can be joined back to the row it describes.
-- old_data JSON NULL / new_data JSON NULL: JSON is a native column type --
-  MySQL validates the text is well-formed JSON and lets queries reach
-  inside it (new_data->>'$.status'). old_data is the BEFORE image (NULL
-  for inserts, because there was no before), new_data the AFTER image
-  (NULL for deletes). Both NULL cannot happen by trigger design.
-- No foreign keys on this table, on purpose: an audit trail is append-only
-  and independent of the tables it describes.
-
-TABLE 9: unnormalized_bookings (the teaching anti-pattern)
-
-    CREATE TABLE unnormalized_bookings (
-      unnorm_id       INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      booking_no      VARCHAR(10)   NOT NULL,        -- NOT NULL on purpose: it makes the
-      passenger_name  VARCHAR(120)  NOT NULL,        --   insert anomaly demo fail loudly
-      passenger_email VARCHAR(200)  NOT NULL,
-      flight_no       VARCHAR(8)    NOT NULL,
-      origin_city     VARCHAR(100)  NOT NULL,
-      dest_city       VARCHAR(100)  NOT NULL,
-      seat_no         VARCHAR(4)    NOT NULL,
-      fare            DECIMAL(10,2) NOT NULL,
-      payment_status  VARCHAR(20)   NOT NULL,
-      baggage         VARCHAR(100)  NOT NULL DEFAULT ''  -- '15kg,7kg' or ''
-    ) ENGINE = InnoDB;
-
-- Every fact of the booking AND of the passenger AND of the flight is
-  copied into one row: that repetition is the update anomaly, the NOT NULL
-  columns without defaults are the insert anomaly, and flight facts that
-  exist only here are the delete anomaly (all demonstrated in B2).
-- baggage VARCHAR(100) NOT NULL DEFAULT '': the 1NF violation -- a LIST of
-  bags ('15kg,7kg') inside one cell. DEFAULT '' allows bookings without
-  bags. The 1NF view splits this column into rows (B2).
-- payment_status is VARCHAR(20), not an ENUM -- the flat table lacks even
-  the type-level protections the real tables have. Part of the lesson.
-
-TABLE 10: demo_numbers
-
-    CREATE TABLE demo_numbers (
-      n INT UNSIGNED PRIMARY KEY
-    ) ENGINE = InnoDB;
-
-- One column, which is itself the primary key: the numbers 1..8. This is a
-  "tally table", the standard SQL trick for splitting a list into rows:
-  JOIN the list column against these numbers and take the n-th piece with
-  SUBSTRING_INDEX. Used only by the 1NF view (B2).
-
-THE TRIGGERS (11 of them)
-
-First, the DELIMITER mechanic, used by all of them:
-
-    DELIMITER ;;
-    ...trigger body, which contains ; inside...
-    END;;
-    DELIMITER ;
-
-- DELIMITER ;; tells the mysql CLIENT "statements now end with ;;, not ;".
-  WHY: a trigger body contains ordinary ';' characters (the SELECT, the IF
-  lines). Without the swap, the client would cut the CREATE TRIGGER at the
-  first ';' and MySQL would see a broken statement. After END;;,
-  DELIMITER ; restores the normal separator. DELIMITER is a client command,
-  not SQL -- which is why schema.sql must be run through the mysql CLI.
-
-Trigger 1: trg_bookings_no_double_seat (the business rule)
-
-    CREATE TRIGGER trg_bookings_no_double_seat BEFORE INSERT ON bookings
-    FOR EACH ROW
-    BEGIN
-      IF NEW.status = 'CONFIRMED' AND EXISTS (
-        SELECT 1 FROM bookings b
-        WHERE b.seat_id = NEW.seat_id AND b.status = 'CONFIRMED'
-      ) THEN
-        SIGNAL SQLSTATE '45000'
-          SET MESSAGE_TEXT = 'Seat already has a CONFIRMED booking';
-      END IF;
-    END;;
-
-- CREATE TRIGGER <name> BEFORE INSERT ON bookings: fires before every
-  INSERT into bookings is applied. BEFORE means it can abort the write;
-  AFTER (used below for audit) means the row is already stored.
-- FOR EACH ROW: runs once per affected row -- an INSERT of 3 rows fires it
-  3 times.
-- BEGIN ... END: a compound block, needed because the body holds more than
-  one statement.
-- NEW is the row being inserted (OLD is the before-image in UPDATE/DELETE
-  triggers). NEW.status reads the incoming value.
-- EXISTS (SELECT 1 FROM bookings b WHERE b.seat_id = NEW.seat_id AND
-  b.status = 'CONFIRMED'): EXISTS is TRUE when the subquery returns at
-  least one row; SELECT 1 is convention -- we test existence, not values.
-  The subquery asks: does ANOTHER confirmed booking already occupy this
-  seat?
-- SIGNAL SQLSTATE '45000': raise an error from inside the database. 45000
-  is the SQL standard's "unhandled user-defined exception" class; MySQL
-  surfaces it to the client as error 1644 (ER_SIGNAL_EXCEPTION).
-- SET MESSAGE_TEXT = '...': the human-readable message the client sees.
-- END IF closes the IF. END closes the BEGIN block.
-- WHY a trigger instead of app code: it runs inside the same transaction
-  as the insert, no client can bypass it (console, script, anything), and
-  it doubles as the isolation demo's proof (B6).
-
-Trigger 2: trg_bookings_no_reconfirm (the same rule for UPDATE)
-
-    CREATE TRIGGER trg_bookings_no_reconfirm BEFORE UPDATE ON bookings
-    FOR EACH ROW
-    BEGIN
-      IF NEW.status = 'CONFIRMED' AND OLD.status <> 'CONFIRMED' AND EXISTS (
-        SELECT 1 FROM bookings b
-        WHERE b.seat_id = NEW.seat_id AND b.status = 'CONFIRMED' AND b.booking_id <> NEW.booking_id
-      ) THEN
-        SIGNAL SQLSTATE '45000'
-          SET MESSAGE_TEXT = 'Seat already has a CONFIRMED booking';
-      END IF;
-    END;;
-
-- BEFORE UPDATE ON bookings: fires before an UPDATE is applied.
-- NEW.status = 'CONFIRMED' AND OLD.status <> 'CONFIRMED': react only when
-  an update MOVES a row into CONFIRMED (from CANCELLED). Ordinary updates
-  of an already-confirmed row pass through.
-- b.booking_id <> NEW.booking_id: exclude the row being updated from the
-  duplicate check -- otherwise it would find ITSELF and always abort. This
-  closes the loophole of re-confirming a cancelled booking onto a seat
-  that another passenger took meanwhile.
-
-Trigger 3: trg_bookings_after_insert (audit)
-
-    CREATE TRIGGER trg_bookings_after_insert AFTER INSERT ON bookings
-    FOR EACH ROW
-      INSERT INTO audit_log (table_name, action, row_id, old_data, new_data)
-      VALUES ('bookings', 'INSERT', NEW.booking_id, NULL,
-              JSON_OBJECT('flight_id', NEW.flight_id, 'seat_id', NEW.seat_id,
-                          'passenger_id', NEW.passenger_id, 'status', NEW.status));;
-
-- AFTER INSERT: fires after the row is actually stored -- if the insert
-  failed, no audit row exists.
-- The body is a single statement, so BEGIN/END is not required.
-- The INSERT writes the audit row INSIDE the same transaction as the
-  booking: if the transaction rolls back, the audit row vanishes with it.
-  The audit trail only ever describes committed reality.
-- JSON_OBJECT('key', value, ...): builds a JSON document from pairs -- the
-  after-image of the new booking, stored in new_data.
-- old_data = NULL: nothing existed before an INSERT.
-
-Trigger 4: trg_bookings_after_update (audit)
-
-    CREATE TRIGGER trg_bookings_after_update AFTER UPDATE ON bookings
-    FOR EACH ROW
-      INSERT INTO audit_log (table_name, action, row_id, old_data, new_data)
-      VALUES ('bookings', 'UPDATE', NEW.booking_id,
-              JSON_OBJECT('status', OLD.status),
-              JSON_OBJECT('status', NEW.status));;
-
-- OLD = the row BEFORE the update, NEW = after. Both images are stored, so
-  a CONFIRMED -> CANCELLED flip leaves evidence of what the row used to be.
-- Only 'status' is captured because it is the only column that changes in
-  this app; more columns would mean more JSON pairs.
-
-Trigger 5: trg_bookings_after_delete (audit)
-
-    CREATE TRIGGER trg_bookings_after_delete AFTER DELETE ON bookings
-    FOR EACH ROW
-      INSERT INTO audit_log (table_name, action, row_id, old_data, new_data)
-      VALUES ('bookings', 'DELETE', OLD.booking_id,
-              JSON_OBJECT('flight_id', OLD.flight_id, 'seat_id', OLD.seat_id,
-                          'passenger_id', OLD.passenger_id, 'status', OLD.status),
-              NULL);;
-
-- AFTER DELETE: the row is already gone, only OLD still exists -- the
-  before-image is preserved and new_data is NULL.
-
-Triggers 6 to 11 (payments, baggage, seats) repeat the shapes above with
-different tables and JSON pairs; line by line they are trigger-3/4/5
-pattern, one audit row per changed row, same transactional behavior:
-
-    trg_payments_after_insert   AFTER INSERT ON payments -> logs booking_id,
-        amount, status as the after-image (a full booking = 2 audit rows)
-    trg_payments_after_update   AFTER UPDATE ON payments -> logs the void:
-        old_data {status: PAID}, new_data {status: FAILED}
-    trg_baggage_after_insert    AFTER INSERT ON baggage  -> logs booking_id,
-        kg, fee (so a booking with a bag writes exactly 3 audit rows)
-    trg_baggage_after_delete    AFTER DELETE ON baggage  -> logs the removed
-        bag's before-image
-    trg_seats_after_insert      AFTER INSERT ON seats    -> logs flight_id,
-        seat_no, class, fare (seeding fires these; reset clears the noise)
-    trg_seats_after_update      AFTER UPDATE ON seats    -> logs the fare
-        change, old and new
-
-Say out loud: "Ten of the eleven triggers are bookkeeping -- one audit row
-per row-level change, written inside the same transaction. The eleventh,
-the BEFORE INSERT guard, is a business rule the database enforces. Both
-kinds are invisible to application code and cannot be bypassed."
-
-========================================================================
-C. FRONTEND AND BACKEND (CONCEPTS ONLY)
-========================================================================
-
-Tools and libraries actually used:
-- Node.js -- runs JavaScript on the server, serves the API and the static
-  files. Chosen because it is in the course stack and needs no extra runtime.
-- Express (npm) -- minimal HTTP router; maps URL paths to handler functions
-  and serves the public/ folder. Chosen because it is ~10 lines of setup.
-- mysql2 (npm, promise API) -- MySQL driver; sends parameterized SQL and
-  speaks the MySQL protocol. Chosen because mysql (the older driver) lacks a
-  clean promise API and mysql2 is its maintained successor.
-- dotenv (npm) -- reads .env into process.env so credentials are not in code.
-- VS Code -- editor used while writing; no plugins are required for this
-  project. MySQL Workbench (or the mysql CLI) is only needed to apply
-  schema.sql / seed.sql; either works.
-
-Concepts used, one line each:
-- REST API -- the server exposes resources (/api/flights, /api/book, ...)
-  where method + path + JSON body describe the action.
-- JSON -- the data format for every request and response body.
-- fetch() -- the browser's built-in way to make HTTP calls from JavaScript.
-- Polling with setInterval -- the page calls the API every 2 seconds and
-  re-renders changed rows with a 150ms flash; simple and robust for a demo.
-- Connection pool (mysql2 createPool, limit 5) -- reuses open MySQL
-  connections instead of opening one per request; transactions borrow one
-  connection and always give it back in finally.
-- Parameterized queries -- values are sent as data, never pasted into the SQL
-  text, which is the standard defense against SQL injection. The only
-  endpoint accepting raw SQL text validates it first (single statement,
-  SELECT/INSERT/UPDATE/DELETE only, table viewer names whitelisted).
-- Whitelisting -- /api/table/:name looks the table up in a fixed map of
-  pre-written SELECTs; anything not in the map is refused.
-- Environment variables -- DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, PORT come
-  from .env; .env is git-ignored, .env.example documents the names.
-- CSS custom properties (design tokens) -- palette, fonts and spacing are
-  defined once in :root of style.css, so the whole look lives in one place.
-- Static file serving -- express.static serves public/ (index.html,
-  style.css, app.js) so the browser can load the UI.
-
-Two frontend views share one API (switch with the top-bar buttons):
-- Booking site (site.js): a real passenger flow -- flight list with the
-  cheapest fare and free-seat count, a cabin seat map (rows 1-6, letters
-  A-D, business seats marked), passenger signup (POST /api/passengers,
-  where the UNIQUE(email) constraint rejects duplicates with error 1062),
-  a checkout whose Confirm button fires the same POST /api/book one-
-  transaction endpoint and renders its trace next to the button, an
-  e-ticket read back from committed rows (GET /api/bookings?passenger_id=),
-  and "My trips" with Cancel (POST /api/cancel/:id).
-- DBMS console (app.js): the teaching view described in this file.
-
-A booking made on the site is the same transaction shown in the console:
-book on the site, switch to the console, and the new row, the audit log
-entries and the general log are all there.
-
-How everything is connected:
-
-    browser                      Node.js server                 MySQL 8
-    +-------------------+        +---------------------+        +------------------+
-    | index.html        | fetch  | Express routes      | SQL    | skyledger tables |
-    | app.js (poll 2s)  | -----> | /api/book ...       | -----> | triggers fire    |
-    | style.css         | <----- | mysql2 pool (5 conns)| <----- | audit_log grows  |
-    +-------------------+  JSON  +---------------------+        +------------------+
-                                       ^                                   |
-                                       +----------- polled back -----------+
-
-Request path of one booking (click -> committed row):
-1. Click "Book seat" in the console, or "Confirm booking" on the booking
-   site -- both POST /api/book with {flight_id, seat_id, passenger_id, baggage_kg}.
-2. app.js POSTs /api/book with {flight_id, seat_id, passenger_id, baggage_kg}.
-3. Express route validates the numbers, borrows a connection from the pool.
-4. BEGIN; SELECT ... FOR UPDATE locks the seat row.
-5. INSERT booking; the BEFORE INSERT trigger re-checks the seat.
-6. AFTER INSERT trigger writes an audit_log row. Same for payment and bag.
-7. COMMIT. The response carries the trace (BEGIN ... COMMIT with timestamps).
-8. The next 2-second poll reads bookings (new row flashes) and audit_log
-   (new entries at the top).
-
-Run it locally in five steps:
-1. Install MySQL 8 and Node.js 18+.
-2. npm install
-3. mysql -u root -p < schema.sql   then   mysql -u root -p < seed.sql
-4. cp .env.example .env, set DB_USER / DB_PASSWORD.
-5. npm start and open http://localhost:3000
-
-========================================================================
-D. DEMO SCRIPT (what to click, what to say, what the teacher sees)
-========================================================================
-
-Step 1 -- The problem: one flat table.
-Click: the tab "unnormalized_bookings" (center). Then the three buttons under
-"Normalization" (Update / Insert / Delete anomaly), pressing "Run query" for
-each loaded query. Say: "Everything about a booking is copied into one row --
-even the bags as a comma list." Teacher sees: the update leaves Asha with two
-different emails; the insert is refused (error 1364); the delete wipes out
-SK202's route facts.
-
-Step 2 -- The fix: 3NF tables.
-Click: tabs "bookings", "seats", "passengers", "flights". Optionally run
-sql/1nf.sql, sql/2nf.sql, sql/3nf.sql before the demo and show the three
-view tabs. Say: "Each fact lives with the entity it belongs to; references
-are checked keys." Teacher sees: small clean tables, no repeated facts.
-
-Step 3 -- A booking, atomically, with an audit trail.
-Click: flight SK101, seat 2B, a passenger, baggage kg 10, "Book seat".
-Say: "One transaction: lock, booking, payment, bag, commit -- and the
-database itself logs every row." Teacher sees: transaction trace BEGIN ...
-COMMIT with timestamps; bookings tab flashes one new row; audit log shows
-3 trigger rows (bookings INSERT, payments INSERT, baggage INSERT).
-
-Step 4 -- Atomicity under failure.
-Click: seat 3A, "Book with forced failure: after payment". Say: "Same
-transaction, forced error before COMMIT." Teacher sees: trace ends in
-ROLLBACK; bookings/payments/baggage/audit_log all unchanged -- zero partial
-rows.
-
-Step 5 -- Constraints = consistency.
-Click: FK error, UNIQUE error, CHECK error, Trigger error. Say: "The
-database refuses bad data with numbered errors; my app cannot bypass this."
-Teacher sees: 1452 (foreign key), 1062 (duplicate email), 3819 (kg range),
-1644 with SQLSTATE 45000 (seat already has a CONFIRMED booking).
-
-Step 6 -- Locking = isolation.
-Click: a free seat, then "Isolation demo (A vs B)". Say: "A locks the seat
-row and holds an uncommitted booking; B must wait; A commits; B's trigger
-now sees A's booking and rejects it." Teacher sees the trace:
-A BEGIN -> A lock -> A INSERT -> B BEGIN -> B LOCK WAIT (with the
-information_schema.INNODB_TRX evidence) -> A COMMIT -> B error 1644 ->
-B ROLLBACK.
-
-Step 7 -- Durability.
-Do: book a seat, press Ctrl-C in the terminal, run npm start again, reload
-the page. Say: "COMMIT already wrote to InnoDB's log on disk." Teacher
-sees: the booking is still there.
-
-Step 8 -- Server-level log.
-Type in the SQL box:
-    SELECT event_time, command_type,
-           CAST(argument AS CHAR CHARACTER SET utf8mb4) AS argument
-    FROM mysql.general_log
-    ORDER BY event_time DESC, thread_id DESC LIMIT 30;
-(or just open the "General log" tab). Say: "MySQL itself recorded every
-statement -- including the BEGIN and COMMIT of our transactions." Teacher
-sees: the raw statements with timestamps, newest first.
-
-========================================================================
-E. LIKELY TEACHER QUESTIONS
-========================================================================
-
-Q1. Why 3NF and not BCNF or higher?
-A. 3NF removes update/insert/delete anomalies for this data; BCNF matters
-when a table has several overlapping candidate keys. None of these tables
-has a non-trivial dependency of that kind, so 3NF is already BCNF here --
-I can show that every determinant is a key.
-
-Q2. What happens if the server crashes mid-transaction?
-A. The connection dies, MySQL never received COMMIT, so InnoDB rolls the
-transaction back from its undo log on startup. The audience-visible state
-was never wrong because uncommitted work is invisible to other sessions.
-
-Q3. Difference between the audit log and the general query log?
-A. The audit log is trigger-written, structured (table, action, row, before
-and after JSON) and transactional -- rolled back rows leave no audit trail.
-The general log is MySQL's own raw record of every received statement, with
-no structure and no link to transaction outcomes.
-
-Q4. Why InnoDB and not MyISAM?
-A. InnoDB provides transactions (BEGIN/COMMIT/ROLLBACK), row-level locking
-and foreign keys. MyISAM has none of these; the whole demo would not exist.
-
-Q5. What is a deadlock, and could one happen here?
-A. Two transactions each holding a lock the other needs. MySQL detects the
-cycle and kills one with error 1213. In this demo every transaction locks
-exactly one seat row in the same order (seat first, then inserts), so there
-is no second lock to wait on -- a deadlock would need two locks taken in
-different orders.
-
-Q6. Why is the trigger check not enough -- why also SELECT FOR UPDATE?
-A. The trigger's SELECT and the INSERT are two steps. Two transactions can
-pass the check at the same instant (both see no booking) and both insert.
-The row lock serializes the check+insert pair so the second transaction's
-check runs only after the first commits.
-
-Q7. What does UNIQUE on a generated column mean here, or why no generated column?
-A. A common alternative is a generated column active_seat_id = IF(status =
-'CONFIRMED', seat_id, NULL) with a UNIQUE index -- NULLs don't collide, so
-cancelled bookings free the slot. This project uses the trigger with
-SIGNAL 45000 instead, because the message is clearer and it doubles as the
-isolation-demo teaching moment; both approaches enforce the same rule.
-
-Q8. Why do booking ids skip numbers during the demo (5, then 7)?
-A. AUTO_INCREMENT ids are consumed even by INSERTs that later roll back --
-atomicity removes the ROWS, not the counter. After "Reset demo data" the
-seed uses TRUNCATE, which resets the counters, so ids are small again.
-
-Q9. Is the raw SQL box a SQL injection hole?
-A. It is deliberately a teaching feature, and it is guarded: one statement
-only, verbs restricted to SELECT/INSERT/UPDATE/DELETE, nothing else reaches
-MySQL. The app's real endpoints never concatenate values into SQL -- they
-use ? placeholders. It exists so you can watch the server log your statements.
-
-Q10. Where is the "one row per change" rule enforced?
-A. In the AFTER triggers: each fires FOR EACH ROW and inserts exactly one
-audit_log row with the row's primary key, so a multi-row UPDATE would
-produce one audit row per changed row.
-
-Q11. How did you set up this console?
-A. The console is three static files (index.html, style.css, app.js) served
-by the same Express server -- no framework, no build tools. Every table you
-see is a real HTML table built by JavaScript: every 2 seconds the page calls
-GET /api/table/<name>, the server runs a whitelisted SELECT from the
-TABLE_SQL map in db.js, and the browser re-renders the rows. Rows that
-changed since the last poll get a 150ms background flash -- my diff against
-the previous poll, so a flash means the row genuinely changed in MySQL. The
-SQL box posts to /api/query, which validates the statement (single statement,
-only SELECT/INSERT/UPDATE/DELETE) and returns raw rows or the raw MySQL
-error. Table names are whitelisted so the endpoint cannot be pointed at
-mysql.user, and every error is JSON {ok:false, code, message} -- which is
-why errors appear inline, never as popups.
-
-Q12. Where is the backend running?
-A. On this same machine, as a Node.js process started with npm start,
-listening on port 3000 -- that is why the browser URL is localhost:3000.
-Inside the process, Express maps the routes and every database access goes
-through one mysql2 connection pool of 5 connections. MySQL itself runs on
-the same host and the pool connects to it at 127.0.0.1:3306 with credentials
-from a .env file that is git-ignored (only .env.example with placeholders is
-committed). So the full path is: browser -> Express on localhost:3000 ->
-mysql2 pool -> MySQL on 127.0.0.1. Nothing is hosted anywhere. Transactions
-borrow one dedicated connection from the pool and always release it in
-finally.
-
-Q13. Show me tables getting updated -- is that real or simulated?
-A. Real, and provable in three steps. Book a seat: (1) the Transaction
-trace tab shows the exact SQL in order -- BEGIN, SELECT ... FOR UPDATE,
-INSERT bookings, INSERT payments, COMMIT -- with timestamps; (2) the
-bookings tab flashes one new row, which means the JSON of that row differs
-from the previous poll; (3) the Audit log tab gains three trigger-written
-rows. Then, to prove it is not a UI trick, run the same query in the SQL
-box: SELECT booking_id, status FROM bookings WHERE booking_id = 5 -- the row
-is in MySQL regardless of my UI. And the General log tab is mysql.general_log,
-MySQL's own record of the statements it received -- the database is the
-witness, not my code. For the reverse: the forced-failure button ends in
-ROLLBACK and the same SELECT shows zero partial rows.
-
-Q14. Were there any plugins, extensions or extra tools?
-A. Almost none -- that was a deliberate constraint. Three npm packages
-total: express (HTTP router + static file serving), mysql2 (MySQL driver
-with a promise API, pool, parameterized queries) and dotenv (loads .env into
-process.env so credentials stay out of code). No frontend framework, no
-bundler, no CSS framework, no icon library, no ORM. No VS Code extension is
-required to build or run this. No MySQL plugins: triggers, CHECK constraints,
-ENUM, JSON columns, SELECT ... FOR UPDATE, information_schema.INNODB_TRX and
-mysql.general_log are all built into MySQL 8 Community Server, and the schema
-was applied with the plain mysql CLI. No browser extensions either -- the UI
-is vanilla JS with native fetch and setInterval. The logic lives in MySQL --
-triggers, constraints, locks -- not in npm packages.
-
-Q15. Why no ORM (Sequelize/Prisma) and no React for the UI?
-A. Because the point was to show the SQL itself: every query is hand-written
-and visible in the code, so the exact SELECT ... FOR UPDATE can be read in
-server.js during the viva -- an ORM would hide precisely the thing being
-demonstrated. React would add a build step and far more code for a single
-page whose logic is polling and a few buttons; getElementById and fetch
-cover it. mysql2 over the older mysql package because it is maintained and
-has a clean promise API, so the code is async/await instead of nested
-callbacks. Nothing was installed globally beyond Node.js, npm and MySQL 8.
-
-========================================================================
-F. CHANGELOG
-========================================================================
-
-2026-10-26
-- Added project scaffolding: package.json, .gitignore, .env.example
-  (dotenv, express, mysql2 dependencies).
-- Added schema.sql: skyledger database, 3NF tables (airports, flights,
-  seats, passengers, bookings, payments, baggage, audit_log,
-  unnormalized_bookings, demo_numbers), FK ON DELETE RESTRICT, CHECK /
-  UNIQUE / ENUM constraints, and 11 triggers (double-booking guard with
-  SIGNAL 45000, audit rows on bookings/payments/baggage/seats).
-- Added seed.sql: idempotent demo data (3 airports, 2 flights, 48 seats,
-  6 passengers, 4 bookings, 10 unnormalized rows), audit log cleared at
-  the end so the demo starts clean.
-- Added server: Express API (db.js pool + whitelist; server.js routes):
-  booking transaction with trace and forced-failure rollback, cancel
-  transaction, constraint demos (FK/UNIQUE/CHECK/trigger), two-connection
-  isolation demo with LOCK WAIT evidence, whitelisted table viewer, guarded
-  raw SQL endpoint, audit log polling, general log reading, reset endpoint.
-- Added web UI (public/): three-column layout, seat map with X-marked
-  booked seats and aria-labels, 2s polling with 150ms row flash, SQL box,
-  audit/general/trace log tabs, concept and normalization demo buttons,
-  inline errors.
-- Added passenger booking site view (public/site.js) with a top-bar view
-  switcher: flight list (cheapest fare, free-seat count via subqueries in
-  GET /api/flights), cabin seat map, passenger signup (POST /api/passengers,
-  UNIQUE(email) enforced -> error 1062), checkout calling the same
-  POST /api/book transaction with its trace shown beside the button,
-  e-ticket read back from committed rows via GET /api/bookings, and
-  "My trips" with cancel.
-- Added sql/1nf.sql, sql/2nf.sql, sql/3nf.sql: 1NF/2NF/3NF walk-through
-  views over unnormalized_bookings.
-- Added README.md and this PROJECT_EXPLAINED.txt.
-- UI polish pass: design tokens in CSS custom properties (warm monochrome
-  palette, pastel status colors), hairline section dividers, near-black
-  primary buttons with a segmented view switch, pastel status badges in
-  tables/logs/trips/e-ticket, sticky table headers with row hover, dashed
-  aisle in the cabin map, Ctrl+Enter runs the SQL box, status dot in the
-  top bar, refined e-ticket block.
-- Verified end to end against MySQL 8.0.46: all 8 demo steps, forced
-  rollback leaving zero partial rows, constraint error codes 1452 / 1062 /
-  3819 / 1644, isolation demo B failing with 1644 after A commits, and
-  durability across a server restart.
-
-2026-10-27
-- Updated PROJECT_EXPLAINED.txt only (no code change): added viva Q&A
-  Q11-Q15 -- how the console is set up (static files + 2s polling from a
-  whitelisted SELECT map), where the backend runs (Node on localhost:3000,
-  pool of 5, MySQL on 127.0.0.1), how to prove table updates are real
-  (trace + flash + trigger rows + raw SQL + general log), the complete list
-  of plugins/extensions (three npm packages, none else), and why no ORM or
-  frontend framework was used.
-- Added section B11 to PROJECT_EXPLAINED.txt (doc-only): the complete
-  schema.sql explained line by line -- DROP/CREATE DATABASE/USE, every
-  column of all 10 tables (types, UNSIGNED, CHAR vs VARCHAR, ENUM,
-  DECIMAL vs FLOAT, JSON, composite UNIQUE, FK ON DELETE RESTRICT, CHECK),
-  the DELIMITER mechanic, and all 11 triggers with their full code and
-  line-by-line explanations.
+The row lock serializes requests for the same seat. If any insert fails, the
+server executes ROLLBACK. The booking, payment, luggage and their audit rows
+all roll back together. A forced-failure button can stop the transaction
+after the booking, payment or luggage insert to demonstrate atomicity.
+
+Cancelling a ticket is another transaction: change its status to CANCELLED,
+void the simulated payment record, then commit. The historical ticket stays
+in the database and its seat becomes bookable again.
+
+G. ACID AND ISOLATION DEMOS
+------------------------------------------------------------
+
+- Atomicity: force a mid-booking failure and see ROLLBACK with no partial
+  booking/payment/luggage records.
+- Consistency: the foreign-key, unique-email, luggage-check and duplicate-seat
+  buttons ask MySQL to reject invalid data.
+- Isolation: connection A locks a free seat and writes a ticket/payment;
+  connection B tries the same seat and waits. When A commits, B resumes and
+  is rejected by the trigger/unique active-seat key.
+- Durability: after a committed ticket, restarting Node does not remove the
+  MySQL rows.
+
+The booking endpoint uses SELECT ... FOR UPDATE. The database unique key is
+also needed because the SQL teaching console permits direct INSERT/UPDATE
+statements that do not use that application lock.
+
+H. TRIGGERS AND LOGS
+------------------------------------------------------------
+
+The schema creates 14 triggers:
+
+- 2 BEFORE triggers protect confirmed-seat bookings on INSERT and UPDATE.
+- 12 AFTER triggers record INSERT, UPDATE and DELETE changes on bookings,
+  payments, luggage and seats.
+
+Audit rows share the same transaction as the write. A rollback removes its
+audit rows too. Master data and the unnormalized teaching table are not in the
+trigger audit scope; the log is not a full database-wide history.
+
+The optional MySQL general query log is different: when enabled, it records
+raw server statements, including reads and statements later rolled back. It
+is off by default and may require a MySQL administrative account to enable.
+
+I. API MAP
+------------------------------------------------------------
+
+    GET  /api/health                 Confirm busnation DB/schema is ready
+    GET  /api/trips                  List schedules, fares and free seats
+    GET  /api/trips/:id/seats        Read a trip's seat inventory
+    POST /api/passengers             Add a passenger
+    GET  /api/bookings?passenger_id= View a passenger's tickets
+    POST /api/book                   Book seat + payment + optional luggage
+    POST /api/cancel/:bookingId      Cancel a ticket and release its seat
+    GET  /api/table/:name            Read an allowlisted table/view
+    POST /api/query                  Run one teaching SQL statement
+    POST /api/constraint-demo        Demonstrate FK/UNIQUE/CHECK/trigger rules
+    POST /api/isolation-demo         Demonstrate two-connection seat locking
+    GET  /api/logs/audit             Read trigger-written audit rows
+    GET  /api/logs/general           Read MySQL's optional general log
+    POST /api/reset                  Restore the sample data
+
+The SQL console is intended for a local classroom demo. It accepts one
+SELECT, INSERT, UPDATE or DELETE statement; it is not a production admin API.
+
+J. RUNNING THE APP
+------------------------------------------------------------
+
+Requirements: Node.js 18+ and MySQL 8.0.16+.
+
+    npm ci
+    cp .env.example .env
+    # Set DB_USER and DB_PASSWORD in .env
+    mysql -u root -p < schema.sql
+    mysql -u root -p < seed.sql
+    npm start
+
+Open http://localhost:3000. schema.sql drops and recreates the busnation
+database. seed.sql clears and restores only its sample rows. Do not run these
+against data you need.
+
+Payments are simulated; the demo has no payment provider or user login. Keep
+the operations console on localhost and do not expose it as a public service
+without adding authentication, real payment integration and stricter API/DB
+permissions.

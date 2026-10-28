@@ -1,5 +1,4 @@
-// db.js: owns the MySQL connection pool and shared helpers (whitelist, error
-// shaping, timestamps). server.js imports this instead of opening its own pool.
+// db.js: owns the MySQL connection pool and shared helpers for BUSNATION.
 require('dotenv').config();
 const mysql = require('mysql2/promise');
 
@@ -17,21 +16,22 @@ const pool = mysql.createPool({
 // Whitelist: table name -> the exact SQL used to read it. Anything not listed
 // here is refused, so /api/table can never be pointed at an arbitrary table.
 const TABLE_SQL = {
-  airports: 'SELECT airport_id, code, city FROM airports ORDER BY airport_id',
-  flights: 'SELECT flight_id, flight_no, origin_id, dest_id, departs_at FROM flights ORDER BY flight_id',
-  seats: 'SELECT seat_id, flight_id, seat_no, class, fare FROM seats ORDER BY seat_id',
+  terminals: 'SELECT terminal_id, code, terminal_name, city FROM terminals ORDER BY terminal_id',
+  buses: 'SELECT bus_id, bus_code, operator_name, bus_name, bus_type FROM buses ORDER BY bus_id',
+  trips: 'SELECT trip_id, trip_no, bus_id, origin_id, dest_id, departs_at, arrives_at FROM trips ORDER BY trip_id',
+  seats: 'SELECT seat_id, trip_id, seat_no, class, fare FROM seats ORDER BY seat_id',
   passengers: 'SELECT passenger_id, name, email, phone FROM passengers ORDER BY passenger_id',
-  bookings: 'SELECT booking_id, flight_id, seat_id, passenger_id, status, created_at FROM bookings ORDER BY booking_id DESC LIMIT 500',
+  bookings: 'SELECT booking_id, trip_id, seat_id, passenger_id, status, created_at FROM bookings ORDER BY booking_id DESC LIMIT 500',
   payments: 'SELECT payment_id, booking_id, amount, status, paid_at FROM payments ORDER BY payment_id DESC LIMIT 500',
-  baggage: 'SELECT baggage_id, booking_id, kg, fee FROM baggage ORDER BY baggage_id DESC LIMIT 500',
+  luggage: 'SELECT luggage_id, booking_id, kg, fee FROM luggage ORDER BY luggage_id DESC LIMIT 500',
   audit_log: 'SELECT log_id, table_name, action, row_id, old_data, new_data, logged_at FROM audit_log ORDER BY log_id DESC LIMIT 500',
   unnormalized_bookings: 'SELECT * FROM unnormalized_bookings ORDER BY unnorm_id',
   bookings_1nf: 'SELECT * FROM bookings_1nf ORDER BY booking_no, bag_no',
   bookings_2nf: 'SELECT * FROM bookings_2nf ORDER BY booking_no',
-  flights_2nf: 'SELECT * FROM flights_2nf ORDER BY flight_no',
+  trips_2nf: 'SELECT * FROM trips_2nf ORDER BY trip_no',
   bookings_3nf: 'SELECT * FROM bookings_3nf ORDER BY booking_no',
   passengers_3nf: 'SELECT * FROM passengers_3nf ORDER BY passenger_name',
-  flights_3nf: 'SELECT * FROM flights_3nf ORDER BY flight_no',
+  trips_3nf: 'SELECT * FROM trips_3nf ORDER BY trip_no',
 };
 
 // MySQL error -> {code, message, sqlState} so every endpoint answers uniformly.
