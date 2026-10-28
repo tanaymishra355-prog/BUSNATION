@@ -27,6 +27,8 @@ B. PROJECT FILES
     public/site.js         Trips, seat map, passenger and ticket flow
     public/app.js          Operations actions, SQL, table explorer and logs
     public/style.css       Responsive BUSNATION visual styles
++    api/index.js           Vercel serverless entry for the Express app
++    vercel.json            Route rewrites for the Vercel deployment
     server.js              Express routes and transaction logic
     db.js                  MySQL pool, safe table-read whitelist, helpers
     schema.sql             Tables, keys, constraints and triggers
@@ -130,6 +132,24 @@ G. ACID AND ISOLATION DEMOS
 The booking endpoint uses SELECT ... FOR UPDATE. The database unique key is
 also needed because the SQL teaching console permits direct INSERT/UPDATE
 statements that do not use that application lock.
+
+Indexes. You never write CREATE INDEX, yet indexes exist everywhere:
+
+- every PRIMARY KEY is the table's clustered index (InnoDB stores rows in
+  primary-key order);
+- every UNIQUE constraint (passengers.email, trips.trip_no,
+  UNIQUE(trip_id, seat_no), payments.booking_id, bookings.active_seat_id) is
+  backed by a unique index — that index is also how MySQL detects duplicate
+  values instantly when raising error 1062;
+- every FOREIGN KEY gets an index on its columns so parent/child checks are
+  fast (visible via SHOW CREATE TABLE bookings).
+
+The seat-lock demo's subquery WHERE seat_id = ... AND status = 'CONFIRMED'
+is fast because the schema adds KEY idx_booking_seat_status (seat_id, status),
+and trip listings sort by departs_at through KEY idx_trip_departure.
+
+Demonstrate with: SHOW CREATE TABLE bookings; (the SQL box only allows
+SELECT/INSERT/UPDATE/DELETE, so run SHOW in the MySQL console).
 
 H. TRIGGERS AND LOGS
 ------------------------------------------------------------

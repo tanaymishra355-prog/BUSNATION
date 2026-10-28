@@ -6,6 +6,8 @@ BUSNATION is a local intercity bus ticketing app and RDBMS teaching demo. Passen
 
 ```text
 BUSNATION/
+├── api/
+│   └── index.js             # Vercel serverless entry for the Express app
 ├── public/
 │   ├── index.html          # Passenger booking page and operations console
 │   ├── site.js             # Trips, seats, passengers, checkout and tickets
@@ -19,12 +21,40 @@ BUSNATION/
 ├── server.js                # Express API and transactional booking logic
 ├── schema.sql               # Database, tables, constraints and triggers
 ├── seed.sql                 # Repeatable sample terminals, trips and tickets
-├── PROJECT_EXPLAINED.txt    # Walkthrough for presenting the project
+├── vercel.json              # Route rewrites for the Vercel deployment
+├── PROJECT_EXPLAINED.txt    # Full walkthrough of the project and its concepts
 ├── package-lock.json
 ├── package.json
 ├── .env.example
 └── .gitignore
 ```
+
+## Tech stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Frontend | Vanilla HTML/CSS/JS | Zero build step; every API call is inspectable |
+| Backend | Node.js + Express | Small, explicit REST API in one file |
+| Database | MySQL 8 (InnoDB) | Transactions, row locks, constraints, triggers |
+| Driver | mysql2 | Prepared statements prevent SQL injection |
+| Hosting | Vercel + hosted MySQL | `api/index.js` + `vercel.json` are preconfigured |
+
+## Concepts covered
+
+Every concept below is demonstrated with working code and UI buttons. `PROJECT_EXPLAINED.txt` walks through each one in plain language, with the SQL and MySQL error codes involved.
+
+| Concept | Where to see it |
+|---|---|
+| Normalization (1NF–3NF) | `sql/` views, anomaly buttons in the RDBMS lab |
+| Primary/foreign keys, `ON DELETE RESTRICT` | `schema.sql`, FK demo button |
+| UNIQUE / CHECK / NOT NULL / ENUM | Constraint demo buttons (errors 1062/3819/1265) |
+| Transactions (BEGIN/COMMIT/ROLLBACK) | `POST /api/book`, forced-failure demo |
+| ACID properties | Atomicity/consistency/isolation/durability demos |
+| Row locking (`SELECT ... FOR UPDATE`) | Two-connection seat-lock demo |
+| Triggers (14) | Double-booking guards + audit log entries |
+| Audit logging with before/after images | `audit_log` table, audit log panel |
+| Generated columns + unique indexes | `bookings.active_seat_id` race-safe seat guard |
+| Prepared statements / injection safety | every parameterized query in `server.js` |
 
 ## Run locally
 
